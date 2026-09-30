@@ -223,6 +223,21 @@ The engine can be exercised without the harness:
 python/.venv/Scripts/python.exe python/transcribe.py --audio sample.webm
 ```
 
+Contract tests (`npm test`) cover the host and browser plugin shapes, the row split, the
+bundle's registration format, and the tool's parameter schema. They cannot cover browser
+behaviour, so `tools/cdp-check.mjs` drives a real Chrome over the DevTools Protocol: it loads
+the running page, asserts the client entry applied, clicks the microphone, and samples the DOM
+to confirm the clock advances and the meter moves.
+
+```sh
+# Against a harness already listening (its logged URL carries the token):
+node tools/cdp-check.mjs "http://127.0.0.1:3080/?token=<token>" 9333
+```
+
+It launches its own Chrome on a separate debugging port, uses Chrome's fake capture device,
+and exits non-zero if the boot audit fails or the meter or clock stays still. That is the half
+no unit test can reach — it is what caught the timer and inject defects.
+
 ## License
 
 MIT

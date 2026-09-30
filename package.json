@@ -45,6 +45,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/contract.test.mjs"
+    "test": "node --test tests/contract.test.mjs",
+    "check:browser": "node tools/cdp-check.mjs"
   }
 }
