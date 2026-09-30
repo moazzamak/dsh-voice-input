@@ -34,13 +34,18 @@ import {
 export const name = 'voice-input'
 
 /**
- * The process seam the engine runs through, the tool registry, and the
- * filesystem an audio path is read through.
+ * The process seam the engine runs through, the tool registry, the filesystem
+ * an audio path is read through, and the model route the polish pass uses.
  *
- * All three are present in every base-backed composition, which is why they can
+ * All four are present in every base-backed composition, which is why they can
  * be hard dependencies. `webServer` is not — see the module comment.
+ *
+ * `llm` must be DECLARED rather than probed: Cordis refuses `ctx.llm` on an
+ * undeclared context, exactly as the browser Guard refuses `ctx.interval`.
+ * `agentDefaultModel` is genuinely optional and is read with `ctx.get`, so a
+ * deployment that configures an explicit polish route needs no default model.
  */
-export const inject = ['shell', 'tools', 'fs']
+export const inject = ['shell', 'tools', 'fs', 'llm']
 
 /** Re-exported so callers and tests read one configuration contract. */
 export const Config = EngineConfig
@@ -67,6 +72,10 @@ export const TRANSCRIBE_PARAMETERS = {
     language: {
       type: 'string',
       description: 'Spoken language code such as "en", or "auto" to detect it. Defaults to the configured language.',
+    },
+    polish: {
+      type: 'boolean',
+      description: 'Set false to return the recognizer\'s own text without the cleanup pass. Defaults to the configured behaviour.',
     },
   },
   required: ['path'],
@@ -176,7 +185,13 @@ export function apply(ctx, config) {
       }
       if (bytes.byteLength === 0) return `The audio file is empty: ${requested}`
 
-      const result = await transcribe(bytes, language === undefined ? {} : { language })
+      const overrides = {
+        ...(language === undefined ? {} : { language }),
+        // Tri-state: absent leaves the configured behaviour, false forces the
+        // raw recognizer text for a caller that wants it verbatim.
+        ...(request.polish === false ? { polish: false } : {}),
+      }
+      const result = await transcribe(bytes, overrides)
       return result.ok ? result.text : `Transcription failed: ${result.error}`
     },
   }))

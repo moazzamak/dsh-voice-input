@@ -75,6 +75,35 @@ hint tells you which to check.
 The transcript is appended to whatever the draft already contains, separated by a space.
 It is never sent for you.
 
+### Cleanup pass
+
+Speech contains filler, false starts, and the occasional mishearing. After recognition, the
+transcript is passed through the model this deployment already selects, which removes filler
+(`um`, `uh`, a hesitant "like"), collapses stutters, adds punctuation, and fixes obvious
+mishearings — while being explicitly forbidden from changing meaning, translating, or touching
+identifiers and technical terms.
+
+Worked example, on a deliberately filler-heavy recording:
+
+| Stage | Text |
+| --- | --- |
+| Whisper | `Umm, so, uhh, like, can you please, you know, refactor the parser and then, umm, run the tests.` |
+| Cleaned | `Can you please refactor the parser and then run the tests?` |
+
+A small `cleaned up` marker appears beside the button afterwards, so you know a pass ran.
+
+**The cleanup is best-effort and can never cost you a transcript.** Any of these keeps the
+recognizer's own text instead, with the reason written to the host log:
+
+- the cleanup call errors, times out, or returns nothing;
+- the rewrite changes length by less than half or more than 1.8× — the signature of a model
+  answering the request rather than cleaning it;
+- no model route can be resolved.
+
+Turn it off with `polish: off`, or pin it to a specific (small, cheap) route with
+`polishProvider` + `polishModel` so cleanup does not ride the large model the agent is using.
+The `voice_transcribe` tool accepts `polish: false` per call.
+
 ### On any surface, as a tool
 
 The same engine is also a model-facing tool, so a CLI, SDK, or ACP session can transcribe
@@ -90,6 +119,7 @@ The tool is `voice_transcribe`:
 | --- | --- | --- |
 | `path` | yes | Audio file to transcribe; relative paths resolve against the session working directory |
 | `language` | no | Language code, or `auto`; defaults to the configured language |
+| `polish` | no | `false` returns the recognizer's text without the cleanup pass |
 
 It returns the transcript as text, or a message naming the failure. Accepted containers are
 whatever ffmpeg decodes — `wav`, `mp3`, `m4a`, `webm`/`opus`, `ogg`, `flac`. The browser
@@ -121,9 +151,16 @@ the row in `$DSH_HOME/profiles/web/cordis.patch.yml` — a patch replaces a row'
 | `language` | `en` | Spoken language, or `auto` to detect |
 | `computeType` | `int8` | CTranslate2 compute type |
 | `timeoutMs` | `300000` | Deadline for one transcription |
+| `polish` | `conservative` | Clean the transcript with a model; `off` returns the raw text |
+| `polishTimeoutMs` | `15000` | Deadline for the cleanup call alone |
+| `polishProvider` / `polishModel` | current selection | Pin cleanup to a specific route |
 | `pythonPath` | package `.venv` | Interpreter with `faster-whisper` |
 | `scriptPath` | bundled CLI | The transcription script |
 | `cacheDir` | `$DSH_HOME/cache/voice-models` | Model weights cache |
+
+The cleanup uses the model the deployment already selects, so it needs no second credential and
+no extra configuration. It is a normal `ctx.llm.stream` call — the same route the agent uses —
+and it runs with `temperature: 0` under its own deadline.
 
 ### Choosing a model
 

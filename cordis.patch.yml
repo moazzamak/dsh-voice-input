@@ -26,6 +26,22 @@
         computeType: int8
         # Deadline for one transcription, in milliseconds.
         timeoutMs: 300000
+        # Clean the transcript once it is recognized: `conservative` removes
+        # filler and false starts, adds punctuation, and fixes obvious
+        # mishearings; `off` returns the recognizer's text untouched.
+        #
+        # The cleanup uses the model this deployment already selects, so it needs
+        # no second credential. It is strictly best-effort: any failure, timeout,
+        # or implausibly large rewrite falls back to the raw transcript rather
+        # than risk changing an instruction.
+        polish: conservative
+        # Deadline for the cleanup call alone, in milliseconds.
+        polishTimeoutMs: 15000
+        # Pin the cleanup to a specific route instead of the current selection —
+        # useful to keep cleanup on a small, cheap model while the agent runs a
+        # large one. Both keys must be set together.
+        # polishProvider: deepseek-official
+        # polishModel: deepseek-v4-flash
         # Uncomment to override the engine location. By default the plugin uses
         # its own bundled CLI and the interpreter that `python/setup.py` built
         # at `<package>/.venv`.

@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
       meter: 'dsh-voice-meter',
       bar: 'dsh-voice-bar',
       watch: 'dsh-voice-watch',
+      note: 'dsh-voice-note',
       hint: 'dsh-voice-hint',
       error: 'dsh-voice-error',
     }
@@ -62,6 +63,7 @@ window.__ModuleLoader__.load({
 .${CLASS.meter}[data-live='true'] .${CLASS.bar} { opacity: 0.9; }
 .${CLASS.watch} { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.8; }
 .${CLASS.hint} { font-size: 11px; color: #e5a34d; white-space: nowrap; }
+.${CLASS.note} { font-size: 11px; opacity: 0.55; white-space: nowrap; }
 .${CLASS.error} { max-width: 320px; overflow: hidden; font-size: 11px; color: #e5484d; text-overflow: ellipsis; white-space: nowrap; }
 `
 
@@ -227,7 +229,7 @@ window.__ModuleLoader__.load({
         return () => { dispose() }
       }, [state.phase, startLevelLoop])
 
-      const insertTranscript = (text) => {
+      const insertTranscript = (text, note) => {
         if (actions === undefined) {
           setState({ phase: 'error', message: 'The composer input is unavailable in this session.' })
           return
@@ -235,7 +237,7 @@ window.__ModuleLoader__.load({
         const existing = typeof draft === 'string' ? draft : ''
         const separator = existing === '' || /\s$/.test(existing) ? '' : ' '
         actions.setDraft(existing + separator + text)
-        setState({ phase: 'idle' })
+        setState(note === null ? { phase: 'idle' } : { phase: 'idle', note })
       }
 
       const submitAudio = async (blob) => {
@@ -262,7 +264,10 @@ window.__ModuleLoader__.load({
             setState({ phase: 'error', message: reason })
             return
           }
-          insertTranscript(String(payload.text).trim())
+          insertTranscript(
+            String(payload.text).trim(),
+            payload.polished === true ? 'cleaned up' : null,
+          )
         } catch (error) {
           setState({
             phase: 'error',
@@ -385,6 +390,13 @@ window.__ModuleLoader__.load({
         children.push(React.createElement('span', {
           key: 'error', className: CLASS.error, role: 'status', title: state.message,
         }, state.message))
+      }
+      if (phase === 'idle' && state.note !== undefined) {
+        // A quiet marker, not a notice: the text is already in the draft, and
+        // this only says a cleanup pass ran on the way there.
+        children.push(React.createElement('span', {
+          key: 'note', className: CLASS.note, role: 'status',
+        }, state.note))
       }
 
       return React.createElement('div', { className: CLASS.root }, ...children)

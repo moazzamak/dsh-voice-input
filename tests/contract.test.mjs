@@ -41,8 +41,10 @@ test('the host row defers its browser route instead of declaring webServer', asy
   const tool = await importPackageFile('index.mjs')
   assert.equal(tool.name, 'voice-input')
   // A hard `webServer` dependency would park this row in every profile without
-  // a browser — where the tool is the only thing that can work.
-  assert.deepEqual(tool.inject, ['shell', 'tools', 'fs'])
+  // a browser — where the tool is the only thing that can work. `llm` IS
+  // declared: the polish pass uses it, and Cordis refuses an undeclared context.
+  assert.deepEqual(tool.inject, ['shell', 'tools', 'fs', 'llm'])
+  assert.ok(!tool.inject.includes('webServer'), 'webServer must be deferred, not declared')
   assert.equal(tool.TRANSCRIBE_TOOL_NAME, 'voice_transcribe')
   assert.equal(tool.VOICE_INPUT_ROUTE, '/voice-input/transcribe')
   assert.equal(typeof tool.apply, 'function')
@@ -77,12 +79,16 @@ test('the model-facing tool keeps its registerable shape', async () => {
   const parameters = tool.TRANSCRIBE_PARAMETERS
   assert.equal(parameters.type, 'object')
   assert.deepEqual(parameters.required, ['path'])
-  assert.deepEqual(Object.keys(parameters.properties).sort(), ['language', 'path'])
+  assert.deepEqual(Object.keys(parameters.properties).sort(), ['language', 'path', 'polish'])
+  const expectedType = { language: 'string', path: 'string', polish: 'boolean' }
   for (const [key, property] of Object.entries(parameters.properties)) {
-    assert.equal(property.type, 'string', `${key} must be a string`)
+    assert.equal(property.type, expectedType[key], `${key} must be ${expectedType[key]}`)
     assert.equal(property.required, undefined, `${key} must not carry a per-property required flag`)
     assert.equal(typeof property.description, 'string', `${key} needs a description`)
   }
+  // `polish` must be tri-state: absent follows the configured behaviour, and
+  // false is the only override, so a caller can ask for the raw recognizer text.
+  assert.ok(source.includes('request.polish === false'), 'only an explicit false overrides polish')
 })
 
 test('host config validation defaults every field and refuses bad values', async () => {
@@ -97,17 +103,45 @@ test('host config validation defaults every field and refuses bad values', async
       language: defaults.value.language,
       computeType: defaults.value.computeType,
       timeoutMs: defaults.value.timeoutMs,
+      polish: defaults.value.polish,
+      polishTimeoutMs: defaults.value.polishTimeoutMs,
     },
-    { model: 'base.en', language: 'en', computeType: 'int8', timeoutMs: 300_000 },
+    {
+      model: 'base.en',
+      language: 'en',
+      computeType: 'int8',
+      timeoutMs: 300_000,
+      polish: 'conservative',
+      polishTimeoutMs: 15_000,
+    },
   )
 
   // A user's own extra keys survive validation.
   assert.equal(validate({ model: 'small.en', custom: 1 }).value.custom, 1)
 
-  const bad = validate({ model: '', computeType: 'float16', timeoutMs: 10 })
+  const bad = validate({ model: '', computeType: 'float16', timeoutMs: 10, polish: 'rewrite' })
   assert.equal(bad.value, undefined)
-  assert.equal(bad.issues.length, 3)
+  assert.equal(bad.issues.length, 4, 'each invalid field reports once')
   assert.equal(validate([]).issues[0].message, 'voice-input config must be an object')
+})
+
+test('the polish pass is optional, bounded, and never fatal', () => {
+  const engine = readFileSync(join(PACKAGE_DIR, 'lib', 'engine.mjs'), 'utf8')
+  // Polish must run through the deployment's own model route, which it reaches
+  // only when the row declares `llm`.
+  assert.ok(engine.includes('ctx.llm.stream('), 'polish must use the llm service')
+  assert.ok(engine.includes("ctx.get('agentDefaultModel')"), 'route falls back to the current selection')
+  assert.ok(engine.includes("config.polish === 'off'"), 'polish must be switchable off')
+  // Every failure path returns undefined so the caller keeps the raw transcript.
+  assert.ok(engine.includes('return undefined'), 'a failed polish must fall back')
+  assert.ok(engine.includes('polishTimeoutMs'), 'polish needs its own deadline')
+  assert.ok(engine.includes('controller.abort'), 'the deadline must cancel the call')
+  // A rewrite that changes length implausibly is dropped rather than trusted.
+  assert.ok(engine.includes('ratio < 0.5 || ratio > 1.8'), 'implausible rewrites are rejected')
+  // The prompt must forbid the dangerous behaviours explicitly.
+  for (const rule of ['Do not:', 'Change meaning', 'Translate', 'technical terms']) {
+    assert.ok(engine.includes(rule), `prompt must state: ${rule}`)
+  }
 })
 
 test('browser half registers its factory in the harness wire format', () => {
