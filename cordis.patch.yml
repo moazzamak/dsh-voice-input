@@ -1,0 +1,30 @@
+# Configuration layer of the `dsh-voice-input` bundle.
+#
+# Rows are inserted by package name, so Node resolution finds the installed code.
+# Every field below carries this plugin's own default, which means most users
+# never touch this layer: edit or override these rows from your profile's
+# `cordis.patch.yml` to point at a different interpreter, model, or cache.
+#
+# A row's whole `config` is replaced, never deep-merged, so restate every key
+# you still want when overriding one.
+
+- insert:
+    - id: voice-input
+      name: dsh-voice-input
+      config:
+        # Model size or name. `base.en` is ~150 MB and decodes about 6 s of
+        # speech per second of CPU on a modern laptop. `small.en` is roughly
+        # three times the compute for noticeably better accuracy.
+        model: base.en
+        # Spoken language code, or `auto` to detect it (multilingual models).
+        language: en
+        # CTranslate2 compute type; `int8` is the fast CPU default.
+        computeType: int8
+        # Deadline for one transcription, in milliseconds.
+        timeoutMs: 300000
+        # Uncomment to override the engine location. By default the plugin uses
+        # its own bundled CLI and the interpreter that `python/setup.py` built
+        # at `<package>/.venv`.
+        # pythonPath: C:\path\to\python.exe
+        # scriptPath: C:\path\to\transcribe.py
+        # cacheDir: C:\Users\you\.dsh\cache\voice-models

@@ -1,0 +1,14 @@
+# Engine virtual environment, created by `python/setup.py`.
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Package manager output
+node_modules/
+*.tgz
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
