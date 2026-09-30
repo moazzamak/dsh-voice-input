@@ -143,8 +143,8 @@ def main() -> int:
         download_model(interpreter, args.model)
 
     print()
-    print("Voice input is ready. Restart the harness if it was running:")
-    print("  dsh plugin --profile <name> add dsh-voice-input")
+    print("Voice input is ready. Restart DSH so the plugin loads; the microphone")
+    print("button then appears in the composer's tool row.")
     return 0
 
 
