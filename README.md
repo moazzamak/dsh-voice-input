@@ -57,9 +57,20 @@ The microphone button sits in the composer's tool row, left of the model selecto
 | State | What you see |
 | --- | --- |
 | Idle | Grey microphone |
-| Recording | Red stop square, pulsing dot, elapsed `m:ss` |
+| Recording | Red stop square, a **live level meter**, and a running `m:ss` clock |
+| Silent input | The meter stays flat and `no sound — check your microphone` appears |
 | Transcribing | Red microphone, `transcribing…` |
 | Failure | Red message beside the button (permission denied, no speech, engine error) |
+
+The **level meter is the point**, not decoration: a recording indicator that never moves cannot
+be told apart from a muted microphone. Fourteen bars track the incoming level, sampled from the
+same stream through an `AnalyserNode`, so you can watch your voice arrive before you stop. The
+analyser is deliberately never connected to the audio output — that would feed back through
+your speakers.
+
+If the input stays silent for about 1.5 seconds, the meter dims and the hint appears. That covers
+the case the meter alone cannot: a muted microphone and a paused speaker both look flat, and the
+hint tells you which to check.
 
 The transcript is appended to whatever the draft already contains, separated by a space.
 It is never sent for you.
@@ -149,10 +160,10 @@ Two halves, one npm package:
   one exact POST route, `/voice-input/transcribe`, on the composition's `webServer`. It stages
   audio to a temp file and runs the bundled CLI (`lib/engine.mjs`) through the `shell` service.
 - **Browser half** (`client.cjs`) registers a microphone button in the
-  `conversation.input.left` slot, records with `MediaRecorder`, posts the bytes, and calls
-  `inputActions.setDraft()` with the result.
+  `conversation.input.left` slot, records with `MediaRecorder`, meters the same stream through
+  an `AnalyserNode`, posts the bytes, and calls `inputActions.setDraft()` with the result.
 
-Four details are load-bearing, and every one was found by testing rather than reading:
+Five details are load-bearing, and every one was found by testing rather than reading:
 
 - **The host stages; the engine only reads.** A confined shell refuses writes outside the
   session workspace — including the platform temp root — so an engine that wrote its own
@@ -171,6 +182,13 @@ Four details are load-bearing, and every one was found by testing rather than re
   so requiredness must be the object-level `required: [...]` array. The in-repo
   `defineTool` helper accepts a per-property `required: true` convenience form that is
   rejected on the wire.
+- **A slot name is not a service.** The browser Loader resolves a bundle's `inject` list
+  before `apply` runs, and the client boot audit fails the page on any pending entry — so
+  declaring `conversation.input.left` produced
+  `pending (waiting for service: conversation.input.left)` and took the whole Web boot down.
+  `slots.inject(…)` is what waits for the slot declaration; the bundle declares only `slots`.
+  The timer service is *probed* rather than declared for the same class of reason, and the
+  meter degrades harmlessly without it.
 
 The engine venv lives at the **package root** (`<package>/.venv`), resolved from
 `lib/engine.mjs`, so both host responsibilities find the same interpreter.

@@ -127,10 +127,26 @@ test('browser half registers its factory in the harness wire format', () => {
   // A slot name is NOT a service: declaring it in `inject` leaves the browser
   // entry pending forever and fails the boot audit with
   // "pending (waiting for service: conversation.input.left)". `slots.inject` is
-  // the mechanism that waits for the slot declaration.
+  // the mechanism that waits for the slot declaration. The timer is probed for
+  // the same class of reason.
   const declared = source.match(/const inject = \[([^\]]*)\]/)
   assert.ok(declared !== null, 'inject must be a literal array')
   assert.equal(declared[1].trim(), "'slots'", 'only the slot registry may be injected')
+})
+
+test('the browser half proves it can hear the user', () => {
+  const source = readFileSync(join(PACKAGE_DIR, 'client.cjs'), 'utf8')
+  // A recording indicator that never moves cannot be told apart from a muted
+  // microphone, so a live level meter and a running clock are requirements.
+  assert.ok(source.includes('createAnalyser(stream)'), 'must analyse the recorded stream')
+  assert.ok(source.includes('getByteTimeDomainData'), 'must sample the time-domain level')
+  assert.ok(source.includes('METER_BARS'), 'must render a multi-bar meter')
+  assert.ok(source.includes("role: 'img'") || source.includes("'aria-label'"), 'meter needs an accessible label')
+  assert.ok(source.includes('no sound — check your microphone'), 'must warn when the input is silent')
+  assert.ok(source.includes('elapsedText(elapsed)'), 'clock must render React state, not a bare Date.now()')
+  assert.ok(source.includes('startLevelLoop'), 'clock and meter need the timer service')
+  // The analyser must never be routed to the speakers (feedback loop).
+  assert.ok(source.includes('connect(audioContext.destination)') === false, 'must not monitor to the destination')
 })
 
 test('browser and host halves agree on the route', () => {
