@@ -37,12 +37,23 @@ test('manifest declares the bundle patch and the browser half', () => {
 test('host half exposes the Cordis plugin shape', async () => {
   const host = await importPackageFile('index.mjs')
   assert.equal(host.name, 'voice-input')
-  assert.deepEqual(host.inject, ['webServer', 'shell'])
+  assert.deepEqual(host.inject, ['shell', 'tools', 'fs'])
   assert.equal(typeof host.apply, 'function')
   assert.equal(typeof host.VOICE_INPUT_ROUTE, 'string')
   // The client half posts to this exact path, so it is a cross-half contract.
   assert.equal(host.VOICE_INPUT_ROUTE, '/voice-input/transcribe')
   assert.equal(typeof host.Config?.['~standard']?.validate, 'function')
+})
+
+test('the model-facing tool keeps its name and registerable shape', async () => {
+  const host = await importPackageFile('index.mjs')
+  assert.equal(host.TRANSCRIBE_TOOL_NAME, 'voice_transcribe')
+  const source = readFileSync(join(PACKAGE_DIR, 'index.mjs'), 'utf8')
+  // The registry rejects a definition without output { schema, render }, so
+  // both must be present on the raw JSON-Schema form this package uses.
+  assert.ok(source.includes('ctx.tools.register('), 'tool must register through ctx.tools')
+  assert.ok(/output: \{\s*schema: \{ type: 'string' \},\s*render:/.test(source), 'output needs schema + render')
+  assert.ok(source.includes('readBytes(target, exec?.signal, MAX_TOOL_FILE_BYTES)'), 'reads must be bounded')
 })
 
 test('host config validation defaults every field and refuses bad values', async () => {

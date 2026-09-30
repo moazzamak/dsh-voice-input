@@ -50,6 +50,8 @@ nothing to run and nothing to allow.
 
 ## Use
 
+### In the Web GUI
+
 The microphone button sits in the composer's tool row, left of the model selector.
 
 | State | What you see |
@@ -61,6 +63,30 @@ The microphone button sits in the composer's tool row, left of the model selecto
 
 The transcript is appended to whatever the draft already contains, separated by a space.
 It is never sent for you.
+
+### On any surface, as a tool
+
+The same engine is also a model-facing tool, so a CLI, SDK, or ACP session can transcribe
+an audio file with no browser involved:
+
+```sh
+dsh --profile headless "transcribe /path/to/meeting.m4a and save the transcript next to it"
+```
+
+The tool is `voice_transcribe`:
+
+| Argument | Required | Meaning |
+| --- | --- | --- |
+| `path` | yes | Audio file to transcribe; relative paths resolve against the session working directory |
+| `language` | no | Language code, or `auto`; defaults to the configured language |
+
+It returns the transcript as text, or a message naming the failure. Accepted containers are
+whatever ffmpeg decodes — `wav`, `mp3`, `m4a`, `webm`/`opus`, `ogg`, `flac`. The browser
+route and the tool share one engine, one cache, and one configuration.
+
+Because the tool exists on every surface but the route only where a browser can reach it,
+the plugin declares no hard dependency on `webServer`: a headless or SDK profile loads it,
+registers the tool, and skips the route.
 
 ## Configuration
 
@@ -120,33 +146,38 @@ If `huggingface.co` is blocked, set `DSH_VOICE_HF_ENDPOINT` to a mirror such as
 Two halves, one npm package:
 
 - **Host half** (`index.mjs`) registers one exact POST route, `/voice-input/transcribe`, on
-  the composition's `webServer`. It stages the uploaded bytes to a temp file and runs the
-  bundled CLI through the `shell` service.
+  the composition's `webServer`, and a model-facing `voice_transcribe` tool on `tools`. It
+  stages audio to a temp file and runs the bundled CLI through the `shell` service.
 - **Browser half** (`client.cjs`) registers a microphone button in the
   `conversation.input.left` slot, records with `MediaRecorder`, posts the bytes, and calls
   `inputActions.setDraft()` with the result.
 
-Two details are load-bearing, and both were found by testing rather than reading:
+Three details are load-bearing, and all three were found by testing rather than reading:
 
-- **The host decodes and stages; the engine only reads.** A confined shell refuses writes
-  outside the session workspace — including the platform temp root — so an engine that
-  wrote its own decoded copy would fail with `PermissionError`. Keeping every write in the
-  host process keeps the engine usable under any sandbox policy.
+- **The host stages; the engine only reads.** A confined shell refuses writes outside the
+  session workspace — including the platform temp root — so an engine that wrote its own
+  decoded copy would fail with `PermissionError`. Keeping every write in the host process
+  keeps the engine usable under any sandbox policy.
 - **The shell parses a command string with its own interpreter** (`pwsh -Command` on
   Windows). Quoted paths in command position are therefore not an executable to PowerShell,
   so the Windows command is wrapped in `cmd /c`.
+- **The tool schema is standard JSON Schema.** The provider validates `parameters` verbatim,
+  so requiredness must be the object-level `required: [...]` array. The in-repo
+  `defineTool` helper accepts a per-property `required: true` convenience form that is
+  rejected on the wire.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
 | No microphone button | The bundle is installed in a different profile than the one booted. `dsh web` always means the `web` profile. |
-| `pending (waiting for service: webServer)` at boot | The profile has no Web GUI. Install into a profile created from the `web` template. |
+| `pending (waiting for service: webServer)` at boot | An older build declared `webServer` as a hard dependency, which no non-Web profile provides. Update; the route is now registered only where it exists. |
+| `Invalid schema for function 'voice_transcribe'` | An older build used the in-repo per-property `required: true` form. Update to a build with standard JSON Schema. |
 | `faster-whisper is not installed in this interpreter` | Run `python/setup.py`; or point `pythonPath` at the interpreter you did install into. |
 | `ModuleNotFoundError: av` / `metadata_errors` | `av` 19 removed an argument faster-whisper passes. `setup.py` pins `av<19`; reinstall with it. |
 | `Microphone permission was denied` | Allow the microphone for the harness origin in your browser's site settings. |
 | `no speech was recognized` | The recording was silent or too short. |
-| `the transcription engine exited with code 1 … PermissionError` | An older build staged the payload for the child to write. Update to ≥0.1.0 final. |
+| `the transcription engine exited with code 1 … PermissionError` | An older build staged the payload for the child to write. Update. |
 
 ## Development
 

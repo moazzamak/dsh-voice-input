@@ -33,17 +33,23 @@ import { fileURLToPath } from 'node:url'
 export const name = 'voice-input'
 
 /**
- * The route carrier and the process seam the engine runs through.
+ * The process seam the engine runs through, the tool registry, and the
+ * filesystem the model-facing tool reads through.
  *
- * The composition's `connection` trust fence is deliberately absent here and
- * consumed through `ctx.get('connection')` instead: it is optional
- * infrastructure, and a hard dependency on a service a given composition does
- * not provide would park this row forever instead of transcribing.
+ * `webServer` and `connection` are deliberately NOT declared here:
+ * - `webServer` exists only in Web compositions, and a hard dependency on it
+ *   would park this row forever in a headless, SDK, or ACP profile — where the
+ *   tool below is the whole point. The route is registered only when it exists.
+ * - `connection` is optional infrastructure read through `ctx.get()` for the
+ *   same reason.
  */
-export const inject = ['webServer', 'shell']
+export const inject = ['shell', 'tools', 'fs']
 
 /** Exact path the browser half posts recordings to. */
 export const VOICE_INPUT_ROUTE = '/voice-input/transcribe'
+
+/** Model-facing tool name. */
+export const TRANSCRIBE_TOOL_NAME = 'voice_transcribe'
 
 /** This package's own install directory, so bundled assets need no configuration. */
 const ASSET_DIR = dirname(fileURLToPath(import.meta.url))
@@ -54,6 +60,9 @@ const ASSET_DIR = dirname(fileURLToPath(import.meta.url))
  * anything larger is a bug or an attack rather than a voice instruction.
  */
 const MAX_BODY_BYTES = 24 * 1024 * 1024
+
+/** Ceiling for one file the model-facing tool reads. */
+const MAX_TOOL_FILE_BYTES = 200 * 1024 * 1024
 
 /** CTranslate2 compute types this plugin accepts for CPU decoding. */
 const COMPUTE_TYPES = ['int8', 'int8_float32', 'float32']
@@ -224,15 +233,16 @@ function quote(value) {
  * Build the engine command line for one recording.
  * @param {object} paths - interpreter, script, audio file, and cache paths.
  * @param {VoiceInputConfig} config - validated host configuration.
+ * @param {{ model?: string, language?: string }} [overrides] - per-call overrides.
  * @returns {string} the command string handed to `shell.resolve`.
  */
-function engineCommand(paths, config) {
+function engineCommand(paths, config, overrides = {}) {
   const invocation = [
     quote(paths.pythonPath),
     quote(paths.scriptPath),
     '--audio', quote(paths.audioPath),
-    '--model', config.model,
-    '--language', config.language,
+    '--model', overrides.model ?? config.model,
+    '--language', overrides.language ?? config.language,
     '--compute-type', config.computeType,
     '--cache-dir', quote(paths.cacheDir),
   ].join(' ')
@@ -252,6 +262,9 @@ export function apply(ctx, config) {
   /** The composition's browser-trust fence, when this composition provides one. */
   const connection = ctx.get('connection')
 
+  /** The HTTP carrier, present only in compositions that serve a browser. */
+  const webServer = ctx.get('webServer')
+
   /**
    * Answer an untrusted request.
    * @param {unknown} req - the Node request.
@@ -270,9 +283,10 @@ export function apply(ctx, config) {
   /**
    * Transcribe one staged recording, or report why it could not be.
    * @param {Buffer} bytes - raw recorded audio.
+   * @param {{ model?: string, language?: string }} [overrides] - per-call overrides.
    * @returns {Promise<{ ok: true, text: string } | { ok: false, error: string }>}
    */
-  const transcribe = async (bytes) => {
+  const transcribe = async (bytes, overrides = {}) => {
     const runId = `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`
     // Staged under the OS temp root by THIS process, which is not confined. The
     // engine then only ever reads: a confined shell may refuse writes anywhere
@@ -288,7 +302,7 @@ export function apply(ctx, config) {
       return { ok: false, error: `could not stage the recording: ${String(error)}` }
     }
 
-    const command = engineCommand({ pythonPath, scriptPath, audioPath, cacheDir }, config)
+    const command = engineCommand({ pythonPath, scriptPath, audioPath, cacheDir }, config, overrides)
 
     let spec
     try {
@@ -328,31 +342,96 @@ export function apply(ctx, config) {
     return { ok: true, text: parsed.text.trim() }
   }
 
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: VOICE_INPUT_ROUTE,
-    handler: async (req, res) => {
-      if (rejected(req, res)) return
-      if (req.method !== 'POST') {
-        res.statusCode = 405
-        res.setHeader('allow', 'POST')
-        res.end()
-        return
+  // The browser route is registered only where a browser can reach it; the
+  // model-facing tool below is what makes the engine useful everywhere else.
+  if (webServer !== undefined) {
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: VOICE_INPUT_ROUTE,
+      handler: async (req, res) => {
+        if (rejected(req, res)) return
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('allow', 'POST')
+          res.end()
+          return
+        }
+        const bytes = await readBoundedBody(req)
+        if (bytes === null) {
+          sendJson(res, 413, {
+            ok: false,
+            error: 'the recording is larger than this route accepts; keep voice instructions under a few minutes',
+          })
+          return
+        }
+        if (bytes.byteLength === 0) {
+          sendJson(res, 400, { ok: false, error: 'the request carried no audio' })
+          return
+        }
+        const result = await transcribe(bytes)
+        sendJson(res, result.ok ? 200 : 502, result)
+      },
+    }))
+  }
+
+  // The model-facing tool makes this engine useful on surfaces that have no
+  // browser to record from — a CLI or SDK session can ask for an audio file to
+  // be transcribed without any UI at all.
+  ctx.effect(() => ctx.tools.register({
+    name: TRANSCRIBE_TOOL_NAME,
+    description: 'Transcribe an audio file to text with the local faster-whisper engine. '
+      + 'Accepts the formats ffmpeg decodes (wav, mp3, m4a, webm/opus, ogg, flac). Runs offline on '
+      + 'this machine; nothing is uploaded.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path of the audio file to transcribe. Relative paths resolve against the session working directory.',
+        },
+        language: {
+          type: 'string',
+          description: `Spoken language code such as "en", or "auto" to detect it. Defaults to the configured language (${config.language}).`,
+        },
+      },
+      // Standard JSON Schema: the provider validates this shape verbatim, so
+      // requiredness is the object-level array (a per-property `required: true`
+      // is the in-repo DSL's convenience form and is rejected on the wire).
+      required: ['path'],
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: String(value) }],
+    },
+    /**
+     * Read one audio file and transcribe it.
+     * @param {unknown} args - validated model arguments.
+     * @param {{ signal?: AbortSignal }} exec - execution identity and cancellation.
+     * @returns {Promise<string>} the transcript, or a message naming the failure.
+     */
+    execute: async (args, exec) => {
+      const request = args ?? {}
+      const requested = typeof request.path === 'string' ? request.path.trim() : ''
+      if (requested === '') return 'No audio path was given. Pass the path of an audio file to transcribe.'
+      const language = typeof request.language === 'string' && request.language.trim() !== ''
+        ? request.language.trim()
+        : undefined
+
+      let bytes
+      try {
+        const target = await ctx.fs.resolve(requested)
+        const info = await ctx.fs.stat(target)
+        if (info === undefined) return `No such audio file: ${requested}`
+        if (info.type !== 'file') return `Not a regular file: ${requested}`
+        bytes = Buffer.from(await ctx.fs.readBytes(target, exec?.signal, MAX_TOOL_FILE_BYTES))
+      } catch (error) {
+        return `Could not read ${requested}: ${String(error)}`
       }
-      const bytes = await readBoundedBody(req)
-      if (bytes === null) {
-        sendJson(res, 413, {
-          ok: false,
-          error: 'the recording is larger than this route accepts; keep voice instructions under a few minutes',
-        })
-        return
-      }
-      if (bytes.byteLength === 0) {
-        sendJson(res, 400, { ok: false, error: 'the request carried no audio' })
-        return
-      }
-      const result = await transcribe(bytes)
-      sendJson(res, result.ok ? 200 : 502, result)
+      if (bytes.byteLength === 0) return `The audio file is empty: ${requested}`
+
+      const result = await transcribe(bytes, language === undefined ? {} : { language })
+      return result.ok ? result.text : `Transcription failed: ${result.error}`
     },
   }))
 }
