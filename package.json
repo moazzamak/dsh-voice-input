@@ -26,6 +26,7 @@
   "files": [
     "index.mjs",
     "client.cjs",
+    "lib/engine.mjs",
     "cordis.patch.yml",
     "python/transcribe.py",
     "python/setup.py",

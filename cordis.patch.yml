@@ -1,12 +1,16 @@
 # Configuration layer of the `dsh-voice-input` bundle.
 #
-# Rows are inserted by package name, so Node resolution finds the installed code.
-# Every field below carries this plugin's own default, which means most users
-# never touch this layer: edit or override these rows from your profile's
-# `cordis.patch.yml` to point at a different interpreter, model, or cache.
+# ONE row, because Cordis parks a row until every service it declares exists and
+# the boot audit fails on any entry left pending. The row hard-depends on
+# shell/tools/fs (present in every base-backed profile) and DEFERS its browser
+# route with `ctx.inject(['webServer'])`, so:
 #
-# A row's whole `config` is replaced, never deep-merged, so restate every key
-# you still want when overriding one.
+#   Web profile       tool + microphone route
+#   headless / SDK    tool only, no pending entry, boot stays green
+#
+# Every field carries this plugin's own default, so most users never touch this
+# layer: override the row from your profile's `cordis.patch.yml` instead. A row's
+# whole `config` is replaced, never deep-merged, so restate every key you want.
 
 - insert:
     - id: voice-input

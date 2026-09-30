@@ -145,14 +145,14 @@ If `huggingface.co` is blocked, set `DSH_VOICE_HF_ENDPOINT` to a mirror such as
 
 Two halves, one npm package:
 
-- **Host half** (`index.mjs`) registers one exact POST route, `/voice-input/transcribe`, on
-  the composition's `webServer`, and a model-facing `voice_transcribe` tool on `tools`. It
-  stages audio to a temp file and runs the bundled CLI through the `shell` service.
+- **Host half** (`index.mjs`) registers a model-facing `voice_transcribe` tool on `tools`, and
+  one exact POST route, `/voice-input/transcribe`, on the composition's `webServer`. It stages
+  audio to a temp file and runs the bundled CLI (`lib/engine.mjs`) through the `shell` service.
 - **Browser half** (`client.cjs`) registers a microphone button in the
   `conversation.input.left` slot, records with `MediaRecorder`, posts the bytes, and calls
   `inputActions.setDraft()` with the result.
 
-Three details are load-bearing, and all three were found by testing rather than reading:
+Four details are load-bearing, and every one was found by testing rather than reading:
 
 - **The host stages; the engine only reads.** A confined shell refuses writes outside the
   session workspace — including the platform temp root — so an engine that wrote its own
@@ -161,18 +161,28 @@ Three details are load-bearing, and all three were found by testing rather than 
 - **The shell parses a command string with its own interpreter** (`pwsh -Command` on
   Windows). Quoted paths in command position are therefore not an executable to PowerShell,
   so the Windows command is wrapped in `cmd /c`.
+- **The route is deferred, not declared.** `webServer` must not be a hard dependency (no
+  headless/SDK/ACP profile has one), and it is published *after* this row's `apply` — so
+  reading it once there sees `undefined` and the route silently never registers. A second
+  row that waits for it is equally wrong: the boot audit fails on any entry left pending
+  (`N entry did not activate`). `ctx.inject(['webServer'], …)` is the form that defers
+  correctly and stays green everywhere.
 - **The tool schema is standard JSON Schema.** The provider validates `parameters` verbatim,
   so requiredness must be the object-level `required: [...]` array. The in-repo
   `defineTool` helper accepts a per-property `required: true` convenience form that is
   rejected on the wire.
+
+The engine venv lives at the **package root** (`<package>/.venv`), resolved from
+`lib/engine.mjs`, so both host responsibilities find the same interpreter.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
 | No microphone button | The bundle is installed in a different profile than the one booted. `dsh web` always means the `web` profile. |
-| `pending (waiting for service: webServer)` at boot | An older build declared `webServer` as a hard dependency, which no non-Web profile provides. Update; the route is now registered only where it exists. |
-| `Invalid schema for function 'voice_transcribe'` | An older build used the in-repo per-property `required: true` form. Update to a build with standard JSON Schema. |
+| `pending (waiting for service: webServer)` at boot | An older build declared `webServer` as a hard dependency or as a separate waiting row. Update; the route is now deferred with `ctx.inject`. |
+| Button appears but every recording fails with an engine path error | An older build resolved the venv relative to the wrong module. Update, then re-run `python/setup.py`. |
+| `Invalid schema for function 'voice_transcribe'` | An older build used the in-repo per-property `required: true` form. Update. |
 | `faster-whisper is not installed in this interpreter` | Run `python/setup.py`; or point `pythonPath` at the interpreter you did install into. |
 | `ModuleNotFoundError: av` / `metadata_errors` | `av` 19 removed an argument faster-whisper passes. `setup.py` pins `av<19`; reinstall with it. |
 | `Microphone permission was denied` | Allow the microphone for the harness origin in your browser's site settings. |
