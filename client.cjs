@@ -31,9 +31,11 @@ window.__ModuleLoader__.load({
 
     /** Meter geometry, and how often the analyser is sampled. */
     const METER_BARS = 14
-    const METER_INTERVAL_MS = 80
+    // 50 ms keeps the meter reading as motion (20 fps) rather than as a series
+    // of jumps, at a negligible cost: one analyser read and fourteen spans.
+    const METER_INTERVAL_MS = 50
     /** Consecutive near-silent samples before the muted-microphone hint appears. */
-    const QUIET_SAMPLES_BEFORE_HINT = 18
+    const QUIET_SAMPLES_BEFORE_HINT = 30
 
     const CLASS = {
       root: 'dsh-voice-root',
