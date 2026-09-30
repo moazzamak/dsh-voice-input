@@ -397,13 +397,15 @@ window.__ModuleLoader__.load({
      * service, so declaring `conversation.input.left` leaves this browser entry
      * pending forever and the client boot audit fails the whole page —
      * `slots.inject(…)` below is the mechanism that waits for the slot
-     * declaration, and the client Loader resolves `inject` before `apply` runs.
+     * declaration.
      *
-     * The timer service is probed rather than declared for the same class of
-     * reason: a declared dependency that the shell ever fails to publish would
-     * take the whole boot down, and the meter degrades harmlessly without it.
+     * `timer` IS a real service (the client runner publishes it during its own
+     * startup), and the context Guard refuses `ctx.interval` without the
+     * declaration: 'cannot get property "interval" without inject'. Probing it
+     * with `ctx.get` cannot work around that — the property read is itself what
+     * the Guard refuses, before any undefined check runs.
      */
-    const inject = ['slots']
+    const inject = ['slots', 'timer']
 
     /** Register the microphone button for the life of this plugin fiber. */
     function apply(ctx) {
@@ -411,17 +413,9 @@ window.__ModuleLoader__.load({
       ctx.effect(() => removeStyles, 'voice-input styles')
       const slots = ctx.slots
       // The timer helpers are mixed onto the CONTEXT, and a slot component
-      // receives no context, so a bound interval helper is captured here and
-      // handed down. Both spellings are accepted because which object carries
-      // the helper is a Cordis implementation detail; without either, the clock
-      // and meter simply stay still rather than breaking the button.
-      const timer = ctx.get('timer')
-      const interval = typeof ctx.interval === 'function'
-        ? (callback, delay) => ctx.interval(callback, delay)
-        : timer !== undefined && typeof timer.interval === 'function'
-          ? (callback, delay) => timer.interval(callback, delay)
-          : undefined
-      const startLevelLoop = interval
+      // receives no context, so the bound interval helper is captured here and
+      // handed down as a prop.
+      const startLevelLoop = (callback, delay) => ctx.interval(callback, delay)
       slots.inject(SLOT, () => slots.register(
         { name: SLOT, id: ENTRY_ID, order: 50, label: 'Voice input' },
         (props) => (props.inputActions === undefined || props.useInput === undefined

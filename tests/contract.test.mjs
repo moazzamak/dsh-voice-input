@@ -127,11 +127,17 @@ test('browser half registers its factory in the harness wire format', () => {
   // A slot name is NOT a service: declaring it in `inject` leaves the browser
   // entry pending forever and fails the boot audit with
   // "pending (waiting for service: conversation.input.left)". `slots.inject` is
-  // the mechanism that waits for the slot declaration. The timer is probed for
-  // the same class of reason.
+  // the mechanism that waits for the slot declaration.
+  //
+  // `timer` IS a service and MUST be declared: the context Guard refuses
+  // `ctx.interval` with 'cannot get property "interval" without inject', and a
+  // ctx.get() probe cannot dodge that because the property read is what fails.
   const declared = source.match(/const inject = \[([^\]]*)\]/)
   assert.ok(declared !== null, 'inject must be a literal array')
-  assert.equal(declared[1].trim(), "'slots'", 'only the slot registry may be injected')
+  assert.equal(declared[1].trim(), "'slots', 'timer'", 'slots and timer are the injectable services')
+  assert.ok(!declared[1].includes('conversation.input.left'), 'a slot name is never an injected service')
+  assert.ok(source.includes('ctx.interval(callback, delay)'), 'must use the injected timer helper')
+  assert.ok(!/const timer = ctx\.get\('timer'\)/.test(source), 'probing the timer cannot satisfy the Guard')
 })
 
 test('the browser half proves it can hear the user', () => {
