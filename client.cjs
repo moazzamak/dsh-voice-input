@@ -255,8 +255,16 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { className: CLASS.root }, ...children)
     }
 
-    /** Where the browser half puts its button: the composer's left tool row. */
-    const inject = ['slots', SLOT]
+    /**
+     * The only declared dependency: the slot registry.
+     *
+     * The target slot itself must NOT be declared here. A slot name is not a
+     * service, so declaring `conversation.input.left` leaves this browser entry
+     * pending forever — `slots.inject(…)` below is the mechanism that waits for
+     * the slot declaration, and the client Loader resolves `inject` before
+     * `apply` ever runs.
+     */
+    const inject = ['slots']
 
     /** Register the microphone button for the life of this plugin fiber. */
     function apply(ctx) {
