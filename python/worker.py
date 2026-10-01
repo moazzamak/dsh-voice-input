@@ -81,6 +81,29 @@ INTEGRATED_MARKERS = ("graphics", "vega", "uhd", "iris", "radeon(tm) graphics")
 _DISCOVERY: dict | None = None
 
 
+def _trace(message: str) -> None:
+    """Append one line to this worker's trace file.
+
+    ON by default, because a live hang cannot be reproduced in a unit test: the
+    running process is the only thing that knows where it stopped. One line per
+    request and per event, written to `<temp>/dsh-voice-input/trace-<pid>.log`.
+    Set `DSH_VOICE_DEBUG=0` to silence it; the host half honours the same flag.
+    """
+    if os.environ.get("DSH_VOICE_DEBUG") == "0":
+        return
+    try:
+        target = os.environ.get("DSH_VOICE_DEBUG_FILE")
+        if not target:
+            directory = os.path.join(tempfile.gettempdir(), "dsh-voice-input")
+            os.makedirs(directory, exist_ok=True)
+            target = os.path.join(directory, f"trace-{os.getpid()}.log")
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.time():.3f} [pid {os.getpid()}] {message}\n")
+    except Exception:
+        # Tracing must never break a request.
+        pass
+
+
 
 # --------------------------------------------------------------------------- #
 # Discovery: what accelerators does this machine actually have?
@@ -724,7 +747,10 @@ class Engine:
         """Load (or reuse) the model this request asks for."""
         key = self._key_for(request)
         if self._model is not None and key == self._key:
+            # Already warm: this is the whole point of the resident worker.
+            self._load_cpu_ms = 0
             return
+        load_cpu_before = time.process_time()
 
         from faster_whisper import WhisperModel  # noqa: PLC0415 - imported once, lazily
 
@@ -769,6 +795,7 @@ class Engine:
             self._plan = {**chosen, "backend": backend, "computeType": candidate_compute, "deviceIndex": candidate_index}
             if backend == "cpu" and chosen["backend"] != "cpu":
                 self._plan["reason"] = f"{chosen['backend']} load failed; using cpu"
+            self._load_cpu_ms = int((time.process_time() - load_cpu_before) * 1000)
             emit({
                 "event": "ready",
                 "model": model_name,
@@ -779,6 +806,7 @@ class Engine:
                 "deviceName": chosen.get("deviceName"),
                 "reason": self._plan["reason"],
                 "loadMs": int((time.monotonic() - started) * 1000),
+                "loadCpuMs": self._load_cpu_ms,
                 "failures": failures,
                 "capabilities": capabilities(),
             })
@@ -803,6 +831,7 @@ class Engine:
         audio_path = str(request.get("audio") or "")
         if not audio_path or not os.path.isfile(audio_path):
             raise FileNotFoundError(f"audio file not found: {audio_path}")
+        _trace(f"transcribe id={request.get('id')} backend={request.get('backend')} audio={audio_path}")
 
         if self.ggml_ready(request):
             try:
@@ -828,6 +857,7 @@ class Engine:
 
         from faster_whisper.audio import decode_audio  # noqa: PLC0415
 
+        cpu_before = time.process_time()
         self.ensure(request, emit)
         model = self._model
         assert model is not None
@@ -892,6 +922,11 @@ class Engine:
             "text": text,
             "segments": count,
             "elapsed": round(time.monotonic() - started, 3),
+            # This process's own CPU cost for the request, and how much of it was
+            # the model load. Wall time depends on what else the machine is
+            # doing; CPU time does not, so it is what a test can assert on.
+            "cpuMs": int((time.process_time() - cpu_before) * 1000),
+            "loadCpuMs": getattr(self, "_load_cpu_ms", 0),
             "backend": (self._plan or {}).get("backend"),
             "computeType": (self._plan or {}).get("computeType"),
             "deviceIndex": (self._plan or {}).get("deviceIndex"),
@@ -916,6 +951,7 @@ class Worker:
 
     def emit(self, request_id, payload: dict) -> None:
         line = json.dumps({"id": request_id, **payload}, ensure_ascii=False)
+        _trace(f"emit id={request_id} event={payload.get('event')}")
         with self._lock:
             self._out.write(line + "\n")
             self._out.flush()
@@ -930,7 +966,9 @@ class Worker:
 
     def handle(self, request: dict) -> None:
         """Serve one request, exclusively."""
+        _trace(f"handle id={request.get('id')} op={request.get('op')} waiting for the lock")
         with self._lock:
+            _trace(f"handle id={request.get('id')} op={request.get('op')} acquired the lock")
             self._handle_locked(request)
 
     def _handle_locked(self, request: dict) -> None:
@@ -995,6 +1033,7 @@ class Worker:
                 line = line.strip()
                 if line == "":
                     continue
+                _trace(f"stdin line: {line[:200]}")
                 try:
                     request = json.loads(line)
                 except json.JSONDecodeError as error:
@@ -1005,6 +1044,7 @@ class Worker:
                     continue
                 self.handle(request)
         finally:
+            _trace("stdin closed; releasing the engine")
             self._engine.release()
 
 

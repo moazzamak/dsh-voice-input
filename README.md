@@ -252,6 +252,14 @@ Five details are load-bearing, and every one was found by testing rather than re
   `slots.inject(…)` is what waits for the slot declaration; the bundle declares only `slots`.
   The timer service is *probed* rather than declared for the same class of reason, and the
   meter degrades harmlessly without it.
+- **The resident worker reads a live pipe.** The `subprocess` seam exposes a live
+  `child.stdout` only for the stdio mode `'pipe'`; a `{maxBytes}` spec routes the bytes to
+  `collected` and leaves `child.stdout` `undefined`. The worker needs each protocol line the
+  moment it flushes, so it spawns with `'pipe'` — and because nobody else then reads a live
+  stderr, it drains that too (an unread OS pipe fills at ~64 KiB and silently blocks the
+  child forever). Pending requests are released on exit before any `await`, and `run()`
+  enforces `timeoutMs` as a hard deadline, so a wedged request ends in a clean error naming
+  the deadline instead of a hang that only killing DSH can clear.
 
 The engine venv lives at the **package root** (`<package>/.venv`), resolved from
 `lib/engine.mjs`, so both host responsibilities find the same interpreter.
@@ -269,6 +277,7 @@ The engine venv lives at the **package root** (`<package>/.venv`), resolved from
 | `Microphone permission was denied` | Allow the microphone for the harness origin in your browser's site settings. |
 | `no speech was recognized` | The recording was silent or too short. |
 | `the transcription engine exited with code 1 … PermissionError` | An older build staged the payload for the child to write. Update. |
+| A transcription never returns; only killing DSH clears it | An older build spawned the worker with collected output, which the seam hides behind `collected`, so the pump read `undefined` and no request was ever answered or failed. Update, then restart DSH. |
 
 ## Development
 

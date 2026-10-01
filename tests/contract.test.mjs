@@ -222,7 +222,9 @@ test('browser and host halves agree on the route', () => {
 })
 
 test('config layer inserts the row by package name', () => {
-  const patch = readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8')
+  // Normalized to LF: a Windows checkout with core.autocrlf=true hands this
+  // file CRLF endings, and the assertion below spans a line ending.
+  const patch = readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8').replace(/\r\n/g, '\n')
   assert.ok(patch.includes('- insert:'), 'patch must insert rows')
   assert.ok(patch.includes(`name: ${manifest.name}\n`), 'row must reference the package by name')
   assert.ok(patch.includes('id: voice-input'), 'row id must be stable for user overrides')
