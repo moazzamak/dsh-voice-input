@@ -236,3 +236,44 @@ test('engine CLI help is reachable and declares its contract', () => {
   assert.ok(script.includes('--audio-base64-file') === false, 'child must not write; host stages the file')
   assert.ok(script.includes('"ok": True'), 'CLI must print the documented JSON result')
 })
+
+test('one process never runs two engines', async () => {
+  // Each worker owns a whisper-server, and each whisper-server holds its model
+  // in VRAM (~418 MB measured). Two were once observed alive at the same time,
+  // and more would accumulate on every plugin activation. The guard is a
+  // process-wide singleton rather than a per-context map, because a hot reload
+  // can hand apply() a different context object while the old engine still runs.
+  const engineModule = await importPackageFile('lib/engine.mjs')
+  const spawned = []
+  const makeCtx = () => {
+    const ctx = {
+      subprocess: { spawn() { spawned.push(1); throw new Error('must not spawn in this test') } },
+      get: () => undefined,
+      effect() { return () => {} },
+    }
+    Object.defineProperty(ctx, 'shell', { get() { throw new Error('no shell access') } })
+    return ctx
+  }
+  const config = engineModule.Config['~standard'].validate({ polish: 'off' }).value
+
+  const first = engineModule.createStreamingTranscriber(makeCtx(), config)
+  const second = engineModule.createStreamingTranscriber(makeCtx(), config)
+  assert.equal(first, second, 'a second activation must adopt the running engine, not start another')
+
+  // Only a real request may spawn; nothing above should have.
+  assert.equal(spawned.length, 0, 'activation alone must not spawn a worker')
+
+  first.dispose()
+  const third = engineModule.createStreamingTranscriber(makeCtx(), config)
+  assert.notEqual(third, first, 'a disposed engine must be replaced')
+  third.dispose()
+})
+
+test('the row ships a CPU-defaulted backend decision', () => {
+  const patch = readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8')
+  // Whatever the choice, it must be explicit in the row: the engine falls back
+  // in code, but the shipped default is a decision, not an accident.
+  assert.ok(/^\s+backend: (auto|ggml|faster-whisper)$/m.test(patch), 'the row must pin a backend explicitly')
+  assert.ok(/^\s+whisperModel: \S+/m.test(patch), 'the GGML model name must be explicit')
+  assert.ok(/^\s+ggmlDevice: \d+$/m.test(patch), 'the GGML device must be pinned, not auto-picked')
+})

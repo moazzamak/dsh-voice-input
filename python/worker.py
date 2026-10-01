@@ -81,6 +81,7 @@ INTEGRATED_MARKERS = ("graphics", "vega", "uhd", "iris", "radeon(tm) graphics")
 _DISCOVERY: dict | None = None
 
 
+
 # --------------------------------------------------------------------------- #
 # Discovery: what accelerators does this machine actually have?
 # --------------------------------------------------------------------------- #

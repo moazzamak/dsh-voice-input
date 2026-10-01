@@ -5,8 +5,32 @@ Offline local speech-to-text for the [DeepSeek Harness](https://github.com/deeps
 A microphone button appears in the chat composer. Click it, speak, click again, and the
 recognized text is appended to the draft — so you can fix a misheard word and press Enter
 yourself. Nothing is uploaded: audio is recorded in your browser, posted to the harness
-process on your own machine, and decoded there with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-running on CPU.
+process on your own machine, and decoded there.
+
+The model loads **once** and stays warm, so later recordings cost only the decode. Measured
+on this machine with `base.en` on a Ryzen 7 7800X3D, warm: **~0.4 s per recording** on the CPU
+engine, ~0.1 s on the GPU engine. Before that change every recording reloaded the model, which
+took ~10 s.
+
+Text appears in the draft while the audio is still being decoded, so a long instruction can be
+watched rather than waited for.
+
+## Engines
+
+| | CPU (default) | GPU (`whisper.cpp`) |
+| --- | --- | --- |
+| decoder | faster-whisper / CTranslate2 | whisper.cpp |
+| accelerator | CUDA if an NVIDIA card is present | Vulkan (AMD, Intel, NVIDIA) |
+| warm latency, `base.en` | ~0.4 s | ~0.1 s |
+| first run | ~0.7 s model load | 1.7–3.3 s once, while the driver compiles Vulkan pipelines |
+| in-progress text | progressive, while decoding | one update when the transcript is ready |
+| GPU-resident state | none | one model copy (~418 MB) per running engine |
+
+The CPU engine is the default: it is already sub-second warm, its text appears progressively,
+and it holds no GPU state that could accumulate. The bundled
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) engine is there because CTranslate2 — and
+therefore faster-whisper — accelerates only through CUDA, which leaves AMD cards on Windows
+unreachable without it. Set `backend: auto` (or `ggml` to require it) in the row to use it.
 
 ## Requirements
 
@@ -14,6 +38,8 @@ running on CPU.
 - **Python 3.9+** on `PATH` for the one-time engine setup (`python` on Windows, `python3` elsewhere).
 - [uv](https://docs.astral.sh/uv/) is optional; the setup uses it when present and falls back to `pip`.
 - A Chromium-based browser or Firefox with microphone recording support.
+- For the GPU engine only: a Vulkan-capable GPU and a Windows whisper.cpp Vulkan build
+  (bundled here). Its GGML model downloads on first use (~142 MB).
 
 ## Install
 

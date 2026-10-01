@@ -30,17 +30,21 @@
         #                   unavailable instead of silently using the CPU
         #   faster-whisper  CTranslate2 only (CUDA when a CUDA card is present)
         #
-        # whisper.cpp is bundled because Vulkan is the only way to reach an AMD
-        # card on Windows: CTranslate2 — and so faster-whisper — accelerates
-        # only through CUDA there. Measured on an RX 9070 XT with `base.en`:
-        # whisper.cpp returns a transcript in ~0.1-0.2 s warm, faster-whisper on
-        # the CPU in ~0.5 s, and the gap widens with longer recordings.
+        # PINNED TO THE CPU ENGINE ON THIS MACHINE. The measure is not raw speed:
         #
-        # Trade-off: faster-whisper streams partial segments DURING the decode,
-        # whisper.cpp's server answers with the whole transcript at once. The
-        # composer's in-progress text is therefore progressive on the CPU engine
-        # and arrives in one piece on the GPU one.
-        backend: auto
+        #   faster-whisper, warm      ~0.33-0.5 s per recording, and partial text
+        #                             appears WHILE the audio is still decoding
+        #   whisper.cpp/Vulkan, warm  ~0.1-0.2 s, but the transcript arrives in
+        #                             one update at the end, and the first run
+        #                             after a driver cache reset costs 1.7-3.3 s
+        #                             of Vulkan pipeline compilation
+        #
+        # Sub-second either way means the launch cost is gone; what is left is
+        # which behaviour feels better. Progressive text wins for a recording of
+        # any length, and the CPU path holds no GPU state at all, so it cannot
+        # accumulate VRAM or wedge a driver. Set `backend: auto` to bring the
+        # GPU engine back (it is still bundled and works).
+        backend: faster-whisper
         # Model for the whisper.cpp engine, in GGML format. This is a DIFFERENT
         # file from the CTranslate2 `model` above: `ggml-<name>.bin`, downloaded
         # from Hugging Face on first use (~142 MB for base.en) into
@@ -76,7 +80,9 @@
         # from the next recording. 0 closes the worker as soon as it is idle.
         idleShutdownMs: 600000
         # Load the model at plugin activation instead of on the first recording.
-        prewarm: false
+        # On with the CPU engine so even the FIRST recording is sub-second: the
+        # ~0.7 s load happens while DSH starts, not while the user waits.
+        prewarm: true
         # Deadline for one transcription, in milliseconds.
         timeoutMs: 300000
         # Clean the transcript once it is recognized: `conservative` removes
