@@ -25,9 +25,11 @@ import {
   MAX_TOOL_FILE_BYTES,
   TRANSCRIBE_TOOL_NAME,
   VOICE_INPUT_ROUTE,
-  createTranscriber,
+  VOICE_INPUT_WARM_ROUTE,
+  createStreamingTranscriber,
   readBoundedBody,
   sendJson,
+  streamTranscription,
 } from './lib/engine.mjs'
 
 /** Cordis function-plugin name. */
@@ -40,18 +42,29 @@ export const name = 'voice-input'
  * All four are present in every base-backed composition, which is why they can
  * be hard dependencies. `webServer` is not — see the module comment.
  *
+ * `subprocess` is the process seam this row DECLARES. It is composed by the base
+ * bundle on every surface, so the row stays active everywhere, and it is the
+ * seam the engine falls back to.
+ *
+ * `shell` is deliberately NOT declared, even though this composition provides a
+ * shell executor: Cordis refuses an undeclared `ctx.shell` read with
+ * `cannot get property "shell" without inject`, and a composition that mounts no
+ * executor would park this row forever and lose the tool. `lib/engine.mjs`
+ * therefore resolves it with `ctx.get('shell')` — the declared-optional form
+ * Cordis supports — and prefers it when present.
+ *
  * `llm` must be DECLARED rather than probed: Cordis refuses `ctx.llm` on an
  * undeclared context, exactly as the browser Guard refuses `ctx.interval`.
  * `agentDefaultModel` is genuinely optional and is read with `ctx.get`, so a
  * deployment that configures an explicit polish route needs no default model.
  */
-export const inject = ['shell', 'tools', 'fs', 'llm']
+export const inject = ['subprocess', 'tools', 'fs', 'llm']
 
 /** Re-exported so callers and tests read one configuration contract. */
 export const Config = EngineConfig
 
 /** Model-facing tool name, re-exported for callers and tests. */
-export { TRANSCRIBE_TOOL_NAME, VOICE_INPUT_ROUTE }
+export { TRANSCRIBE_TOOL_NAME, VOICE_INPUT_ROUTE, VOICE_INPUT_WARM_ROUTE }
 
 /**
  * The tool's parameter schema, exported so a test can assert the exact wire
@@ -91,11 +104,17 @@ function toolDescription(language) {
 
 /**
  * Register the transcription route on a composition that serves HTTP.
+ *
+ * The route answers with newline-delimited JSON the moment each event exists,
+ * so the composer can show partial text while the rest of the recording is
+ * still being decoded. A client that does not ask for a stream still gets the
+ * single-object answer it always got, which keeps older clients working.
+ *
  * @param {unknown} ctx - the carrier-resolved context.
  * @param {import('./lib/engine.mjs').VoiceInputConfig} config - validated host configuration.
- * @param {import('./lib/engine.mjs').Transcriber} transcribe - the shared engine runner.
+ * @param {import('./lib/engine.mjs').ResidentTranscriber} transcriber - the shared resident engine.
  */
-function registerRoute(ctx, config, transcribe) {
+function registerRoute(ctx, config, transcriber) {
   /** The composition's browser-trust fence, when this composition provides one. */
   const connection = ctx.get('connection')
 
@@ -114,6 +133,13 @@ function registerRoute(ctx, config, transcribe) {
     return true
   }
 
+  /** Whether this caller asked to receive progress rather than one final object. */
+  const wantsStream = (req) => {
+    const accept = String(req.headers?.accept ?? '')
+    if (accept.includes('application/x-ndjson')) return true
+    return String(req.headers?.['x-voice-stream'] ?? '') === '1'
+  }
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: VOICE_INPUT_ROUTE,
@@ -125,6 +151,9 @@ function registerRoute(ctx, config, transcribe) {
         res.end()
         return
       }
+      // The body is read EXACTLY ONCE, here. `streamTranscription` is handed the
+      // bytes rather than the request: a stream can only be consumed once, so a
+      // second read would see an already-ended stream and stage an empty file.
       const bytes = await readBoundedBody(req)
       if (bytes === null) {
         sendJson(res, 413, {
@@ -137,8 +166,34 @@ function registerRoute(ctx, config, transcribe) {
         sendJson(res, 400, { ok: false, error: 'the request carried no audio' })
         return
       }
-      const result = await transcribe(bytes)
+
+      if (wantsStream(req)) {
+        await streamTranscription(res, bytes, transcriber, config)
+        return
+      }
+
+      // Non-streaming callers (older clients, curl) keep the original contract.
+      const result = await transcriber.run(bytes)
       sendJson(res, result.ok ? 200 : 502, result)
+    },
+  }))
+
+  // Recording-start warm-up: answer immediately and let the model load in the
+  // background. A browser that never calls this still works — it just pays the
+  // load cost on the first transcript instead of while the user was speaking.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: VOICE_INPUT_WARM_ROUTE,
+    handler: (req, res) => {
+      if (rejected(req, res)) return
+      if (req.method !== 'POST' && req.method !== 'GET') {
+        res.statusCode = 405
+        res.setHeader('allow', 'POST, GET')
+        res.end()
+        return
+      }
+      transcriber.warm()
+      sendJson(res, 202, { ok: true, warming: true })
     },
   }))
 }
@@ -149,7 +204,10 @@ function registerRoute(ctx, config, transcribe) {
  * @param {import('./lib/engine.mjs').VoiceInputConfig} config - validated host configuration.
  */
 export function apply(ctx, config) {
-  const transcribe = createTranscriber(ctx, config)
+  // One resident engine for the whole plugin: the model is loaded once and kept
+  // warm, so a later recording pays no load cost, and each decode streams its
+  // segments as they are produced.
+  const transcriber = createStreamingTranscriber(ctx, config)
 
   ctx.effect(() => ctx.tools.register({
     name: TRANSCRIBE_TOOL_NAME,
@@ -191,7 +249,7 @@ export function apply(ctx, config) {
         // raw recognizer text for a caller that wants it verbatim.
         ...(request.polish === false ? { polish: false } : {}),
       }
-      const result = await transcribe(bytes, overrides)
+      const result = await transcriber.run(bytes, overrides)
       return result.ok ? result.text : `Transcription failed: ${result.error}`
     },
   }))
@@ -200,6 +258,6 @@ export function apply(ctx, config) {
   // with no Web surface this callback simply never runs, and the tool above is
   // the whole feature — no entry is left pending, so the boot audit stays green.
   ctx.inject(['webServer'], (routeCtx) => {
-    registerRoute(routeCtx, config, transcribe)
+    registerRoute(routeCtx, config, transcriber)
   })
 }

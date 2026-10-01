@@ -43,10 +43,19 @@ test('the host row defers its browser route instead of declaring webServer', asy
   // A hard `webServer` dependency would park this row in every profile without
   // a browser — where the tool is the only thing that can work. `llm` IS
   // declared: the polish pass uses it, and Cordis refuses an undeclared context.
-  assert.deepEqual(tool.inject, ['shell', 'tools', 'fs', 'llm'])
+  //
+  // `subprocess` is declared, `shell` deliberately is NOT. The shell capability
+  // seam changed shape (`resolve` + `run` became `resolve` + `execute`), and a
+  // composition that mounts no shell executor at all would park this row
+  // forever if `shell` were declared. The engine resolves it through
+  // `ctx.get('shell')` instead, which needs no declaration, and falls back to
+  // `subprocess`.
+  assert.deepEqual(tool.inject, ['subprocess', 'tools', 'fs', 'llm'])
+  assert.ok(!tool.inject.includes('shell'), 'shell must be optional, never declared')
   assert.ok(!tool.inject.includes('webServer'), 'webServer must be deferred, not declared')
   assert.equal(tool.TRANSCRIBE_TOOL_NAME, 'voice_transcribe')
   assert.equal(tool.VOICE_INPUT_ROUTE, '/voice-input/transcribe')
+  assert.equal(tool.VOICE_INPUT_WARM_ROUTE, '/voice-input/warm')
   assert.equal(typeof tool.apply, 'function')
   assert.equal(typeof tool.Config?.['~standard']?.validate, 'function')
 
@@ -55,6 +64,9 @@ test('the host row defers its browser route instead of declaring webServer', asy
   const source = readFileSync(join(PACKAGE_DIR, 'index.mjs'), 'utf8')
   assert.ok(source.includes("ctx.inject(['webServer']"), 'route must be registered through ctx.inject')
   assert.ok(!source.includes("ctx.get('webServer')"), 'must not probe the carrier once during apply')
+  // Both routes answer from one deferred callback; nothing may be registered twice.
+  assert.ok(source.includes("path: VOICE_INPUT_ROUTE"), 'transcribe route missing')
+  assert.ok(source.includes("path: VOICE_INPUT_WARM_ROUTE"), 'warm route missing')
 })
 
 test('the host row and the engine agree on shared identity', async () => {
@@ -101,6 +113,8 @@ test('host config validation defaults every field and refuses bad values', async
     {
       model: defaults.value.model,
       language: defaults.value.language,
+      // An EMPTY compute type means "whatever the chosen device prefers": int8
+      // on the CPU, float16 on an accelerator. The engine decides per device.
       computeType: defaults.value.computeType,
       timeoutMs: defaults.value.timeoutMs,
       polish: defaults.value.polish,
@@ -109,20 +123,31 @@ test('host config validation defaults every field and refuses bad values', async
     {
       model: 'base.en',
       language: 'en',
-      computeType: 'int8',
+      computeType: '',
       timeoutMs: 300_000,
       polish: 'conservative',
       polishTimeoutMs: 15_000,
     },
   )
 
+  // Engine selection and residency defaults.
+  assert.equal(defaults.value.backend, 'auto')
+  assert.equal(defaults.value.whisperModel, 'base.en')
+  assert.equal(defaults.value.device, 'auto')
+  assert.equal(defaults.value.ggmlDevice, 0)
+  assert.equal(defaults.value.ggmlDisableGpu, false)
+  assert.equal(defaults.value.prewarm, false)
+  assert.ok(defaults.value.idleShutdownMs > 0, 'the worker must be kept warm by default')
+
   // A user's own extra keys survive validation.
   assert.equal(validate({ model: 'small.en', custom: 1 }).value.custom, 1)
 
-  const bad = validate({ model: '', computeType: 'float16', timeoutMs: 10, polish: 'rewrite' })
+  const bad = validate({ computeType: 'float64', timeoutMs: 10, polish: 'rewrite', device: 'tpu' })
   assert.equal(bad.value, undefined)
   assert.equal(bad.issues.length, 4, 'each invalid field reports once')
   assert.equal(validate([]).issues[0].message, 'voice-input config must be an object')
+  // float16 is a real accelerator compute type now, so it must be ACCEPTED.
+  assert.equal(validate({ computeType: 'float16' }).issues, undefined)
 })
 
 test('the polish pass is optional, bounded, and never fatal', () => {

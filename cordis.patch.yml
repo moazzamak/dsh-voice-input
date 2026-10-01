@@ -22,8 +22,61 @@
         model: base.en
         # Spoken language code, or `auto` to detect it (multilingual models).
         language: en
-        # CTranslate2 compute type; `int8` is the fast CPU default.
-        computeType: int8
+        # Transcription engine.
+        #
+        #   auto            the bundled whisper.cpp (Vulkan) engine when it is
+        #                   installed, otherwise faster-whisper
+        #   ggml            require whisper.cpp; report the reason if it is
+        #                   unavailable instead of silently using the CPU
+        #   faster-whisper  CTranslate2 only (CUDA when a CUDA card is present)
+        #
+        # whisper.cpp is bundled because Vulkan is the only way to reach an AMD
+        # card on Windows: CTranslate2 — and so faster-whisper — accelerates
+        # only through CUDA there. Measured on an RX 9070 XT with `base.en`:
+        # whisper.cpp returns a transcript in ~0.1-0.2 s warm, faster-whisper on
+        # the CPU in ~0.5 s, and the gap widens with longer recordings.
+        #
+        # Trade-off: faster-whisper streams partial segments DURING the decode,
+        # whisper.cpp's server answers with the whole transcript at once. The
+        # composer's in-progress text is therefore progressive on the CPU engine
+        # and arrives in one piece on the GPU one.
+        backend: auto
+        # Model for the whisper.cpp engine, in GGML format. This is a DIFFERENT
+        # file from the CTranslate2 `model` above: `ggml-<name>.bin`, downloaded
+        # from Hugging Face on first use (~142 MB for base.en) into
+        # `<cacheDir>\ggml`. Options: tiny.en, base.en, small.en, medium.en,
+        # large-v3-turbo, or a multilingual name paired with `language: auto`.
+        whisperModel: base.en
+        # Vulkan device index for the whisper.cpp engine. Pin it: ggml otherwise
+        # takes the first device it enumerates, which on a desktop with an
+        # integrated Radeon plus a discrete card may be the integrated one.
+        # On this machine device 0 is the RX 9070 XT and device 1 the iGPU.
+        ggmlDevice: 0
+        # Ask whisper.cpp for the CPU explicitly. Leave false so a broken GPU
+        # reports itself instead of quietly running three times slower.
+        ggmlDisableGpu: false
+        # Which accelerator to use for the faster-whisper engine.
+        #
+        #   auto  rank whatever this machine has: real cards before integrated
+        #         ones, more VRAM first, and the CPU when nothing can accelerate
+        #   gpu   require an accelerator; report why instead of silently
+        #         falling back to the CPU
+        #   cpu   pin the CPU
+        device: auto
+        # CTranslate2 compute type. Leave EMPTY to let the chosen device decide:
+        # `float16` on an accelerator, `int8` on the CPU. Set it only to force a
+        # specific precision (`int8`, `int8_float16`, `float16`, `float32`).
+        computeType: ""
+        # Beam width; 1 is greedy and fastest. Higher costs latency for accuracy.
+        beamSize: 1
+        # Worker threads for CPU decoding; 0 lets CTranslate2 decide.
+        cpuThreads: 0
+        # How long the loaded model stays resident with nothing to do, in
+        # milliseconds. Keeping it warm removes the model-load cost (~1 s here)
+        # from the next recording. 0 closes the worker as soon as it is idle.
+        idleShutdownMs: 600000
+        # Load the model at plugin activation instead of on the first recording.
+        prewarm: false
         # Deadline for one transcription, in milliseconds.
         timeoutMs: 300000
         # Clean the transcript once it is recognized: `conservative` removes
@@ -43,8 +96,17 @@
         # polishProvider: deepseek-official
         # polishModel: deepseek-v4-flash
         # Uncomment to override the engine location. By default the plugin uses
-        # its own bundled CLI and the interpreter that `python/setup.py` built
+        # its own bundled worker and the interpreter that `python/setup.py` built
         # at `<package>/.venv`.
         # pythonPath: C:\path\to\python.exe
+        # workerPath: C:\path\to\worker.py
         # scriptPath: C:\path\to\transcribe.py
         # cacheDir: C:\Users\you\.dsh\cache\voice-models
+        # Device pins for a machine with more than one GPU. Both are read by the
+        # accelerator runtime when the worker starts, so they must be set here
+        # rather than at call time. On a Ryzen desktop with an integrated Radeon
+        # plus a discrete card, the discrete card is usually index 1.
+        #   hipVisibleDevices: "1"     # AMD / ROCm
+        #   cudaVisibleDevices: "0"    # NVIDIA / CUDA
+        # Override the reported GFX architecture when ROCm mis-detects a card.
+        # gfxVersion: "12.0.1"

@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
 
     /** Host route the browser half posts recordings to; must match engine.mjs. */
     const ROUTE = '/voice-input/transcribe'
+    /** Pinged when recording starts so the model can load while the user speaks. */
+    const WARM_ROUTE = '/voice-input/warm'
     const SLOT = 'conversation.input.left'
     const ENTRY_ID = 'voice-input-microphone'
 
@@ -131,6 +133,52 @@ window.__ModuleLoader__.load({
         && typeof navigator.mediaDevices.getUserMedia === 'function'
     }
 
+    /**
+     * Apply one host frame to the composer draft.
+     *
+     * Kept at module scope, and driven only through its `sink`, so the
+     * partial-transcript logic is testable without a DOM or a React renderer:
+     * `sink.setDraft` receives the complete draft text every time.
+     *
+     * The transcript is appended AFTER whatever the user had already typed —
+     * `streamed.base` is captured once, before streaming starts — so a partial
+     * update never rewrites or loses existing draft text.
+     *
+     * @param {{type: string, stage?: string, text?: string, error?: string, polished?: boolean}} frame
+     * @param {{base: string, separator: string, text: string, written: boolean}} streamed
+     * @param {{setDraft: (text: string) => void, setState: (state: object) => void}} sink
+     */
+    function applyFrameToDraft(frame, streamed, sink) {
+      if (frame === null || typeof frame !== 'object') return
+      if (frame.type === 'status') {
+        if (frame.stage === 'loading') sink.setState({ phase: 'transcribing', warming: true })
+        return
+      }
+      if (frame.type === 'partial') {
+        const text = typeof frame.text === 'string' ? frame.text : ''
+        if (text === '') return
+        streamed.text = text
+        streamed.written = true
+        sink.setDraft(streamed.base + streamed.separator + text)
+        return
+      }
+      if (frame.type === 'final') {
+        const text = typeof frame.text === 'string' ? frame.text : ''
+        streamed.text = text
+        sink.setDraft(streamed.base + streamed.separator + text)
+        sink.setState({ phase: 'idle', ...(frame.polished === true ? { note: 'cleaned up' } : {}) })
+        return
+      }
+      if (frame.type === 'error') {
+        if (streamed.written) {
+          // Keep whatever arrived: a half transcript is still the user's words.
+          sink.setState({ phase: 'idle', note: frame.error ?? 'transcription stopped early' })
+        } else {
+          sink.setState({ phase: 'error', message: frame.error ?? 'transcription failed' })
+        }
+      }
+    }
+
     /** An audio-graph analyser if this browser can build one, else null. */
     function createAnalyser(stream) {
       const Ctor = globalThis.AudioContext ?? globalThis.webkitAudioContext
@@ -179,6 +227,8 @@ window.__ModuleLoader__.load({
       const [elapsed, setElapsed] = React.useState(0)
       const [quiet, setQuiet] = React.useState(false)
       const held = React.useRef({ recorder: null, chunks: [], stream: null, startedAt: 0, voice: null })
+      /** The in-flight transcription request, so unmount or a new take can stop it. */
+      const abortRef = React.useRef(null)
       const quietStreak = React.useRef(0)
 
       const supported = recordingSupported()
@@ -203,6 +253,14 @@ window.__ModuleLoader__.load({
             recorder.stop()
           } catch (error) {
             console.error('voice-input: stopping the recorder on unmount failed', error)
+          }
+        }
+        const controller = abortRef.current
+        if (controller !== null) {
+          try {
+            controller.abort()
+          } catch (error) {
+            console.error('voice-input: cancelling the transcription on unmount failed', error)
           }
         }
         releaseStream()
@@ -240,39 +298,103 @@ window.__ModuleLoader__.load({
         setState(note === null ? { phase: 'idle' } : { phase: 'idle', note })
       }
 
+      /** One 'status' | 'partial' | 'final' | 'error' frame from the host. */
+      const applyFrame = (frame, streamed) => applyFrameToDraft(frame, streamed, {
+        setDraft: (value) => {
+          if (actions !== undefined) actions.setDraft(value)
+        },
+        setState,
+      })
+
       const submitAudio = async (blob) => {
+        if (actions === undefined) {
+          setState({ phase: 'error', message: 'The composer input is unavailable in this session.' })
+          return
+        }
         setState({ phase: 'transcribing' })
+        if (blob.size === 0) {
+          setState({ phase: 'error', message: 'The recording was empty; check the microphone input.' })
+          return
+        }
+
+        // The draft as it stood when the transcription began: everything the
+        // user already typed stays untouched, and the transcript is appended
+        // after it as the host streams more of it.
+        const base = typeof draft === 'string' ? draft : ''
+        const separator = base === '' || /\s$/.test(base) ? '' : ' '
+        const streamed = { base, separator, text: '', written: false }
+        const controller = new AbortController()
+        abortRef.current = controller
+
         try {
-          if (blob.size === 0) {
-            setState({ phase: 'error', message: 'The recording was empty; check the microphone input.' })
-            return
-          }
           const response = await fetch(ROUTE, {
             method: 'POST',
-            headers: { 'content-type': 'application/octet-stream' },
+            headers: {
+              'content-type': 'application/octet-stream',
+              // Ask for progress frames rather than one final object.
+              accept: 'application/x-ndjson',
+            },
             body: blob,
+            signal: controller.signal,
           })
-          let payload = {}
-          try {
-            payload = await response.json()
-          } catch (error) {
-            // A non-JSON body means the route failed before it could answer.
-            console.error('voice-input: the host answered with no readable body', error)
-          }
-          if (payload.ok !== true) {
-            const reason = typeof payload.error === 'string' ? payload.error : `transcription failed (HTTP ${response.status})`
-            setState({ phase: 'error', message: reason })
+
+          const streamable = response.body !== null
+            && typeof response.body.getReader === 'function'
+            && String(response.headers.get('content-type') ?? '').includes('ndjson')
+
+          if (!streamable) {
+            // An older host answers with one JSON object; keep working with it.
+            let payload = {}
+            try {
+              payload = await response.json()
+            } catch (error) {
+              console.error('voice-input: the host answered with no readable body', error)
+            }
+            if (payload.ok !== true) {
+              setState({
+                phase: 'error',
+                message: typeof payload.error === 'string' ? payload.error : `transcription failed (HTTP ${response.status})`,
+              })
+              return
+            }
+            insertTranscript(String(payload.text).trim(), payload.polished === true ? 'cleaned up' : null)
             return
           }
-          insertTranscript(
-            String(payload.text).trim(),
-            payload.polished === true ? 'cleaned up' : null,
-          )
+
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+          for (;;) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let newline = buffer.indexOf('\n')
+            while (newline !== -1) {
+              const line = buffer.slice(0, newline).trim()
+              buffer = buffer.slice(newline + 1)
+              if (line !== '') {
+                try {
+                  applyFrame(JSON.parse(line), streamed)
+                } catch (error) {
+                  console.error('voice-input: unreadable frame from the host', error)
+                }
+              }
+              newline = buffer.indexOf('\n')
+            }
+          }
+          // A zero-speech recording ends with an error frame and no draft text.
+          if (!streamed.written && streamed.text === '') setState({ phase: 'idle' })
         } catch (error) {
+          if (error !== null && error !== undefined && error.name === 'AbortError') {
+            setState({ phase: 'idle', note: 'transcription cancelled' })
+            return
+          }
           setState({
             phase: 'error',
             message: `Transcription request failed: ${error && error.message ? error.message : String(error)}`,
           })
+        } finally {
+          if (abortRef.current === controller) abortRef.current = null
         }
       }
 
@@ -307,6 +429,15 @@ window.__ModuleLoader__.load({
           const mimeType = pickAudioMimeType()
           const recorder = new MediaRecorder(stream, mimeType === undefined ? undefined : { mimeType })
           held.current = { recorder, chunks: [], stream, startedAt: Date.now(), voice }
+          // Ask the host to load the model NOW, while the user is still
+          // speaking: that turns the model-load cost into time the recording
+          // was going to take anyway, so the first transcript comes back
+          // without a visible pause.
+          try {
+            void fetch(WARM_ROUTE, { method: 'POST' }).catch(() => {})
+          } catch (error) {
+            console.error('voice-input: prewarming the model failed', error)
+          }
           recorder.ondataavailable = (event) => {
             if (event.data !== undefined && event.data !== null && event.data.size > 0) {
               held.current.chunks.push(event.data)
@@ -384,7 +515,9 @@ window.__ModuleLoader__.load({
           'no sound — check your microphone'))
       }
       if (phase === 'transcribing') {
-        children.push(React.createElement('span', { key: 'busy', className: CLASS.watch, role: 'status' }, 'transcribing…'))
+        children.push(React.createElement('span', {
+          key: 'busy', className: CLASS.watch, role: 'status',
+        }, state.warming === true ? 'loading the model…' : 'transcribing…'))
       }
       if (phase === 'error') {
         children.push(React.createElement('span', {
@@ -440,6 +573,7 @@ window.__ModuleLoader__.load({
     module.exports.apply = apply
     module.exports.VoiceMic = VoiceMic
     module.exports.levelFraction = levelFraction
+    module.exports.applyFrameToDraft = applyFrameToDraft
     return module.exports
   },
 })

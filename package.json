@@ -1,7 +1,7 @@
 {
   "name": "dsh-voice-input",
-  "version": "0.1.0",
-  "description": "Offline local speech-to-text for the DeepSeek Harness composer: a microphone button that records, transcribes with faster-whisper on your own machine, and inserts the text into the chat draft.",
+  "version": "0.2.0",
+  "description": "Offline local speech-to-text for the DeepSeek Harness composer: a microphone button that records, transcribes on your own machine (GPU via whisper.cpp/Vulkan where available), streams the text into the chat draft, and keeps the model resident between recordings.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -12,6 +12,8 @@
     "voice",
     "speech-to-text",
     "whisper",
+    "whisper.cpp",
+    "vulkan",
     "offline"
   ],
   "main": "index.mjs",
@@ -19,6 +21,7 @@
     ".": "./index.mjs",
     "./client": "./client.cjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./python/worker.py": "./python/worker.py",
     "./python/transcribe.py": "./python/transcribe.py",
     "./python/setup.py": "./python/setup.py",
     "./package.json": "./package.json"
@@ -28,8 +31,11 @@
     "client.cjs",
     "lib/engine.mjs",
     "cordis.patch.yml",
+    "python/worker.py",
     "python/transcribe.py",
     "python/setup.py",
+    "engine/bin/whisper-server.exe",
+    "engine/LICENSE-whisper.cpp.txt",
     "README.md",
     "LICENSE"
   ],
