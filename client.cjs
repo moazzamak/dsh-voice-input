@@ -641,6 +641,18 @@ window.__ModuleLoader__.load({
       /** The in-flight transcription request, so unmount or a new take can stop it. */
       const abortRef = React.useRef(null)
       const quietStreak = React.useRef(0)
+      /**
+       * The loudest level heard since this recording began.
+       *
+       * The muted-microphone hint is decided from this and nothing else. It used
+       * to follow the span detector's opinion of whether the user was speaking,
+       * which made it fire whenever the detector was merely unsure — reporting a
+       * dead microphone to someone who was talking, which is the one thing this
+       * hint must never do. The detector's calibration window alone is a second
+       * of guaranteed "not speaking", and it was enough to raise the hint on a
+       * perfectly good recording.
+       */
+      const levelPeak = React.useRef(0)
 
       const supported = recordingSupported()
 
@@ -704,13 +716,19 @@ window.__ModuleLoader__.load({
           } else {
             detector.observe(rms)
             const boundary = detector.advance()
-            quietStreak.current = detector.speaking ? 0 : quietStreak.current + 1
+            // Whether the user can be heard is a question about the AUDIO, not
+            // about the detector: the hint answers "is this microphone dead", and
+            // the detector answers "has a spoken span ended". Tying the first to
+            // the second made a working microphone look dead whenever the
+            // detector was still deciding.
+            levelPeak.current = Math.max(levelPeak.current, level)
+            quietStreak.current = level > 0.006 ? 0 : quietStreak.current + 1
             // A span just closed, so the room is quiet and this is a safe place
             // to cut: everything captured so far can be decoded without the
             // recognizer inventing an ending for a half-spoken word.
             if (boundary !== null && boundary.type === 'end') void flushPeek()
           }
-          setQuiet(quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
+          setQuiet(levelPeak.current <= 0.006 && quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
         }
         const dispose = startLevelLoop(tick, METER_INTERVAL_MS)
         return () => { dispose() }
@@ -815,9 +833,18 @@ window.__ModuleLoader__.load({
             live.text = payload.text.trim()
             live.written = true
             writeLiveDraft(true)
+          } else if (response.status !== 502) {
+            // A 502 is one span the decoder could not answer, which the next span
+            // retries. Anything else — a 404 from a host that never registered
+            // this route, a 401 from the browser-trust fence — will fail on every
+            // span, so it has to be SAID. The composer has no console the user
+            // can read, and a silent live view is indistinguishable from a broken
+            // one, which is exactly how this was found the hard way.
+            setState((previous) => ({ ...previous, note: `live view unavailable (HTTP ${response.status})` }))
           }
         } catch (error) {
           console.error('voice-input: live peek failed', error)
+          setState((previous) => ({ ...previous, note: 'live view unavailable' }))
         } finally {
           live.inFlight = false
           // A visible transcript is worth waiting for; without this delay the
@@ -939,6 +966,9 @@ window.__ModuleLoader__.load({
         setElapsed(0)
         setQuiet(false)
         quietStreak.current = 0
+        // Each recording is judged on its own audio: a previous take that was
+        // loud must not mask a microphone that has since been muted.
+        levelPeak.current = 0
       }
 
       const finishRecording = () => {
