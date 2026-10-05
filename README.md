@@ -14,8 +14,20 @@ on this machine with `base.en` on a Ryzen 7 7800X3D, warm: **~0.4 s per recordin
 engine, ~0.1 s on the GPU engine. Before that change every recording reloaded the model, which
 took ~10 s.
 
-Text appears in the draft while the audio is still being decoded, so a long instruction can be
-watched rather than waited for.
+**The draft fills in while you are still speaking.** The recorder hands over audio every second,
+and a span detector watching the microphone's own noise floor decides when you have paused. At
+each pause the audio captured so far is decoded and the draft is rewritten, with a pulsing caret
+where the next word will land. When you stop, the full recording is transcribed again and polished,
+and that final text replaces everything — so a word the live view got wrong is corrected on the way
+in, not left for you to catch.
+
+The pause matters, and it is why this cuts on silence rather than on a timer. Speech recognition
+given a recording that stops mid-word does not fail; it invents an ending for the half-word it was
+handed. Cutting where the room was quiet is what stops the live view from putting words in your
+mouth, and the final pass corrects the rest.
+
+Typing is never blocked. Whatever you type mid-transcription is kept, and the live text is inserted
+after it.
 
 ## Engines
 

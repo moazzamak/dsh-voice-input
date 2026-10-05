@@ -25,6 +25,7 @@ import {
   MAX_TOOL_FILE_BYTES,
   TRANSCRIBE_TOOL_NAME,
   VOICE_INPUT_ROUTE,
+  VOICE_INPUT_SEGMENT_ROUTE,
   VOICE_INPUT_WARM_ROUTE,
   createStreamingTranscriber,
   readBoundedBody,
@@ -64,7 +65,7 @@ export const inject = ['subprocess', 'tools', 'fs', 'llm']
 export const Config = EngineConfig
 
 /** Model-facing tool name, re-exported for callers and tests. */
-export { TRANSCRIBE_TOOL_NAME, VOICE_INPUT_ROUTE, VOICE_INPUT_WARM_ROUTE }
+export { TRANSCRIBE_TOOL_NAME, VOICE_INPUT_ROUTE, VOICE_INPUT_SEGMENT_ROUTE, VOICE_INPUT_WARM_ROUTE }
 
 /**
  * The tool's parameter schema, exported so a test can assert the exact wire
@@ -194,6 +195,46 @@ function registerRoute(ctx, config, transcriber) {
       }
       transcriber.warm()
       sendJson(res, 202, { ok: true, warming: true })
+    },
+  }))
+
+  // The live view's progress peek. The client posts the audio it has captured up
+  // to the last silence it detected and gets back the transcript of that audio,
+  // so the draft can fill in while the user is still speaking.
+  //
+  // It answers with ONE object rather than a stream, and deliberately so: the
+  // client already knows how to append text, and every peek is a complete
+  // answer about a complete span. Streaming a peek would only re-send the same
+  // words as they were re-decoded.
+  //
+  // `polish: false` is passed explicitly: a peek is replaced by the next peek
+  // and finally by the full-recording pass, so cleaning it would spend the
+  // user's model budget on text that is about to be discarded.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: VOICE_INPUT_SEGMENT_ROUTE,
+    handler: async (req, res) => {
+      if (rejected(req, res)) return
+      if (req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('allow', 'POST')
+        res.end()
+        return
+      }
+      const bytes = await readBoundedBody(req)
+      if (bytes === null) {
+        sendJson(res, 413, { ok: false, error: 'that span is larger than this route accepts' })
+        return
+      }
+      if (bytes.byteLength === 0) {
+        sendJson(res, 400, { ok: false, error: 'the request carried no audio' })
+        return
+      }
+      const result = await transcriber.run(bytes, { polish: false })
+      // A peek that heard nothing is not a failure: the span may have been a
+      // cough, or the tail of a word whose beginning was in the previous span.
+      // The client keeps whatever it already had.
+      sendJson(res, result.ok ? 200 : 502, result)
     },
   }))
 }

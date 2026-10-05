@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-input",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Offline local speech-to-text for the DeepSeek Harness composer: a microphone button that records, transcribes on your own machine (GPU via whisper.cpp/Vulkan where available), streams the text into the chat draft, and keeps the model resident between recordings.",
   "type": "module",
   "license": "MIT",
@@ -20,6 +20,7 @@
   "exports": {
     ".": "./index.mjs",
     "./client": "./client.cjs",
+    "./lib/vad.mjs": "./lib/vad.mjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./python/worker.py": "./python/worker.py",
     "./python/transcribe.py": "./python/transcribe.py",
@@ -30,6 +31,7 @@
     "index.mjs",
     "client.cjs",
     "lib/engine.mjs",
+    "lib/vad.mjs",
     "cordis.patch.yml",
     "python/worker.py",
     "python/transcribe.py",
@@ -51,7 +53,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/contract.test.mjs tests/polish.test.mjs",
+    "test": "node --test tests/contract.test.mjs tests/polish.test.mjs tests/vad.test.mjs tests/live.test.mjs",
     "check:browser": "node tools/cdp-check.mjs"
   }
 }

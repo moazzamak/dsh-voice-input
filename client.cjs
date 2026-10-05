@@ -23,9 +23,15 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
+    // The span detector is shared with the host's tests rather than duplicated
+    // here: where a spoken span begins and ends is the same question in both
+    // places, and one implementation is what keeps the two answers equal.
+    const { VoiceActivityDetector } = require('dsh-voice-input/lib/vad.mjs')
 
     /** Host route the browser half posts recordings to; must match engine.mjs. */
     const ROUTE = '/voice-input/transcribe'
+    /** Posted the audio captured so far, at each silence, to fill the draft live. */
+    const SEGMENT_ROUTE = '/voice-input/segment'
     /** Pinged when recording starts so the model can load while the user speaks. */
     const WARM_ROUTE = '/voice-input/warm'
     const SLOT = 'conversation.input.left'
@@ -39,6 +45,28 @@ window.__ModuleLoader__.load({
     /** Consecutive near-silent samples before the muted-microphone hint appears. */
     const QUIET_SAMPLES_BEFORE_HINT = 30
 
+    /**
+     * How often the recorder hands over a chunk while recording.
+     *
+     * The live view needs the audio in pieces: a peek can only be posted for
+     * audio the browser has already produced, and a single chunk delivered at
+     * `stop` is precisely the behaviour that made the draft arrive all at once.
+     */
+    const CHUNK_MS = 1000
+
+    /**
+     * Shortest gap between two live peeks.
+     *
+     * Each peek decodes everything captured so far, so the cost of a recording
+     * grows with the square of its length. This keeps that growth off the
+     * critical path: a span that closes while a peek is in flight is remembered
+     * and posted when the flight finishes, never dropped.
+     */
+    const PEEK_MIN_INTERVAL_MS = 1200
+
+    /** Marks the live transcript inside the draft, and pulses while work is in flight. */
+    const CARET = '\u258F'
+
     const CLASS = {
       root: 'dsh-voice-root',
       button: 'dsh-voice-button',
@@ -48,7 +76,24 @@ window.__ModuleLoader__.load({
       note: 'dsh-voice-note',
       hint: 'dsh-voice-hint',
       error: 'dsh-voice-error',
+      caret: 'dsh-voice-caret',
     }
+
+    /** One CSS rule, injected with the composer's own stylesheet. */
+    const CARET_CSS = `
+.dsh-voice-caret {
+  display: inline-block;
+  width: 0.5em;
+  margin-left: 1px;
+  color: currentColor;
+  opacity: 0.85;
+  animation: dsh-voice-caret-pulse 1s ease-in-out infinite;
+}
+@keyframes dsh-voice-caret-pulse {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.95; }
+}
+`
 
     const CSS = `
 .${CLASS.root} { display: inline-flex; align-items: center; gap: 6px; }
@@ -73,7 +118,7 @@ window.__ModuleLoader__.load({
     function insertStyles() {
       const tag = document.createElement('style')
       tag.dataset.dshVoiceInput = 'true'
-      tag.textContent = CSS
+      tag.textContent = CSS + CARET_CSS
       document.head.append(tag)
       return () => { tag.remove() }
     }
@@ -131,6 +176,35 @@ window.__ModuleLoader__.load({
         && typeof navigator !== 'undefined'
         && navigator.mediaDevices !== undefined
         && typeof navigator.mediaDevices.getUserMedia === 'function'
+    }
+
+    /**
+     * Remove this recording's live text from the draft, keeping everything else.
+     *
+     * The search is deliberately anchored on the transcript rather than on the
+     * draft layout, because the user may have typed while it was streaming, and a
+     * blind "keep the first N characters" would delete what they wrote. The
+     * markers the live view added — the caret and the separator — go with it.
+     *
+     * @param {string} current - the draft as it stands.
+     * @param {string} base - the draft captured when recording began.
+     * @param {string} liveText - the live transcript that was appended to it.
+     * @returns {string} the draft without the live transcript.
+     */
+    function removeLiveText(current, base, liveText) {
+      if (liveText === '') {
+        // Nothing was transcribed, so only the caret can be present.
+        return current.split(CARET).join('')
+      }
+      const at = current.lastIndexOf(liveText)
+      if (at === -1) return current.split(CARET).join('')
+      const before = current.slice(0, at)
+      const after = current.slice(at + liveText.length).split(CARET).join('')
+      if (before === base) return base + after
+      // The base itself carries the transcript: the only case that happens is a
+      // draft the user has since edited, and then the tail is still theirs.
+      if (before.startsWith(base)) return before + after
+      return current.split(CARET).join('')
     }
 
     /**
@@ -226,7 +300,9 @@ window.__ModuleLoader__.load({
       const [levels, setLevels] = React.useState(() => new Array(METER_BARS).fill(0))
       const [elapsed, setElapsed] = React.useState(0)
       const [quiet, setQuiet] = React.useState(false)
-      const held = React.useRef({ recorder: null, chunks: [], stream: null, startedAt: 0, voice: null })
+      const held = React.useRef({ recorder: null, chunks: [], stream: null, startedAt: 0, voice: null, detector: null })
+      /** The live transcript being built while the user speaks, or null when idle. */
+      const liveRef = React.useRef(null)
       /** The in-flight transcription request, so unmount or a new take can stop it. */
       const abortRef = React.useRef(null)
       const quietStreak = React.useRef(0)
@@ -263,6 +339,7 @@ window.__ModuleLoader__.load({
             console.error('voice-input: cancelling the transcription on unmount failed', error)
           }
         }
+        liveRef.current = null
         releaseStream()
         releaseVoice()
       }, [])
@@ -278,24 +355,141 @@ window.__ModuleLoader__.load({
           const voice = held.current.voice
           if (voice === null) return
           voice.analyser.getByteTimeDomainData(voice.samples)
-          const level = levelFraction(rmsOf(voice.samples))
+          const rms = rmsOf(voice.samples)
+          const level = levelFraction(rms)
           setLevels((previous) => [...previous.slice(1), level])
-          quietStreak.current = level <= 0.1 ? quietStreak.current + 1 : 0
+
+          // The room's own loudness decides what counts as quiet. The meter's
+          // normalised level cannot answer that — it is a fixed scale — so the
+          // detector is fed the raw RMS and measures the floor itself. A fridge,
+          // a fan or a laptop under load would permanently defeat any fixed line.
+          const detector = held.current.detector
+          if (detector === null) {
+            quietStreak.current = level <= 0.1 ? quietStreak.current + 1 : 0
+          } else {
+            detector.observe(rms)
+            const boundary = detector.advance()
+            quietStreak.current = detector.speaking ? 0 : quietStreak.current + 1
+            // A span just closed, so the room is quiet and this is a safe place
+            // to cut: everything captured so far can be decoded without the
+            // recognizer inventing an ending for a half-spoken word.
+            if (boundary !== null && boundary.type === 'end') void flushPeek()
+          }
           setQuiet(quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
         }
         const dispose = startLevelLoop(tick, METER_INTERVAL_MS)
         return () => { dispose() }
       }, [state.phase, startLevelLoop])
 
-      const insertTranscript = (text, note) => {
+      /**
+       * Append `text` to whatever the user already had in the draft.
+       *
+       * The transcript is built on top of a snapshot taken when recording began,
+       * never on the draft as it stands now — because the draft IS where the live
+       * transcript is being written. Reading it back would append every peek to
+       * the previous one.
+       *
+       * @param {string} text - the transcript so far.
+       * @param {string|null} note - a status note to show beside the button.
+       */
+      const insertTranscriptFrom = (base, text, note) => {
         if (actions === undefined) {
           setState({ phase: 'error', message: 'The composer input is unavailable in this session.' })
           return
         }
-        const existing = typeof draft === 'string' ? draft : ''
-        const separator = existing === '' || /\s$/.test(existing) ? '' : ' '
-        actions.setDraft(existing + separator + text)
+        const separator = base === '' || /\s$/.test(base) ? '' : ' '
+        actions.setDraft(base + separator + text)
         setState(note === null ? { phase: 'idle' } : { phase: 'idle', note })
+      }
+
+      const insertTranscript = (text, note) => {
+        insertTranscriptFrom(typeof draft === 'string' ? draft : '', text, note)
+      }
+
+      /**
+       * Rebuild the draft from the base snapshot plus the live transcript.
+       *
+       * Anything the user types while this runs is treated as part of their own
+       * draft and is preserved: the live text always lands after it, and the
+       * final pass rewrites only the live part (see `finishLive`).
+       *
+       * @param {boolean} active - whether transcription is still in progress.
+       */
+      const writeLiveDraft = (active) => {
+        const live = liveRef.current
+        if (actions === undefined || live === null) return
+        const tail = active ? live.text + CARET : live.text
+        const separator = live.base === '' || /\s$/.test(live.base) ? '' : ' '
+        actions.setDraft(live.base + separator + tail)
+      }
+
+      /**
+       * Close the live view and hand the draft back to the caller.
+       *
+       * The whole live transcript is removed in one operation, whatever the user
+       * typed around it, so the authoritative full-recording pass is what the
+       * draft finally contains. Without this the pre-polish text would survive
+       * underneath the polished text and be sent twice.
+       *
+       * @returns {string} the text the user had before this recording began.
+       */
+      const finishLive = () => {
+        const live = liveRef.current
+        liveRef.current = null
+        if (live === null || actions === undefined) return typeof draft === 'string' ? draft : ''
+        const current = typeof draft === 'string' ? draft : ''
+        const cleaned = removeLiveText(current, live.base, live.text)
+        if (cleaned !== current) actions.setDraft(cleaned)
+        return cleaned
+      }
+
+      /**
+       * Decode the audio captured so far and show it, so the draft fills in while
+       * the user is still speaking.
+       *
+       * Only called when the detector says the room went quiet, which is the one
+       * moment a peek can be cut without the recognizer inventing an ending for
+       * the half-word the cut landed in.
+       */
+      const flushPeek = async () => {
+        const held = heldRef.current
+        const live = liveRef.current
+        if (live === null || held.recorder === null || held.chunks.length === 0) return
+        if (live.inFlight) {
+          live.pending = true
+          return
+        }
+        const type = held.recorder.mimeType === '' || held.recorder.mimeType === undefined
+          ? 'audio/webm'
+          : held.recorder.mimeType
+        const blob = new Blob(held.chunks.slice(), { type })
+        if (blob.size === 0) return
+        live.inFlight = true
+        live.pending = false
+        live.lastPeekAt = Date.now()
+        try {
+          const response = await fetch(SEGMENT_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: blob,
+          })
+          const payload = await response.json().catch(() => ({}))
+          // A peek that heard nothing changes nothing: the span may have been a
+          // cough, or a word whose beginning lay in the previous span.
+          if (payload.ok === true && typeof payload.text === 'string' && payload.text.trim() !== '') {
+            live.text = payload.text.trim()
+            live.written = true
+            writeLiveDraft(true)
+          }
+        } catch (error) {
+          console.error('voice-input: live peek failed', error)
+        } finally {
+          live.inFlight = false
+          // A visible transcript is worth waiting for; without this delay the
+          // loop would peek continuously and spend the whole recording decoding.
+          await new Promise((resolve) => { setTimeout(resolve, PEEK_MIN_INTERVAL_MS) })
+          if (live.pending && liveRef.current !== null) void flushPeek()
+        }
       }
 
       /** One 'status' | 'partial' | 'final' | 'error' frame from the host. */
@@ -317,10 +511,11 @@ window.__ModuleLoader__.load({
           return
         }
 
-        // The draft as it stood when the transcription began: everything the
-        // user already typed stays untouched, and the transcript is appended
-        // after it as the host streams more of it.
-        const base = typeof draft === 'string' ? draft : ''
+        // The live transcript is withdrawn first, in one operation: the final
+        // pass is authoritative, and leaving the pre-polish text underneath it
+        // would send every word twice — once as the recognizer heard it and once
+        // as the cleanup rewrote it.
+        const base = finishLive()
         const separator = base === '' || /\s$/.test(base) ? '' : ' '
         const streamed = { base, separator, text: '', written: false }
         const controller = new AbortController()
@@ -357,7 +552,7 @@ window.__ModuleLoader__.load({
               })
               return
             }
-            insertTranscript(String(payload.text).trim(), payload.polished === true ? 'cleaned up' : null)
+            insertTranscriptFrom(base, String(payload.text).trim(), payload.polished === true ? 'cleaned up' : null)
             return
           }
 
@@ -386,6 +581,9 @@ window.__ModuleLoader__.load({
           if (!streamed.written && streamed.text === '') setState({ phase: 'idle' })
         } catch (error) {
           if (error !== null && error !== undefined && error.name === 'AbortError') {
+            // The live text is withdrawn with the request: a cancelled
+            // transcription must not leave half-decoded words in the draft.
+            finishLive()
             setState({ phase: 'idle', note: 'transcription cancelled' })
             return
           }
@@ -395,6 +593,9 @@ window.__ModuleLoader__.load({
           })
         } finally {
           if (abortRef.current === controller) abortRef.current = null
+          // Backstop: `finishLive` already ran before the request, so this only
+          // matters on a path that returned before reaching it.
+          if (liveRef.current !== null) finishLive()
         }
       }
 
@@ -428,7 +629,23 @@ window.__ModuleLoader__.load({
           }
           const mimeType = pickAudioMimeType()
           const recorder = new MediaRecorder(stream, mimeType === undefined ? undefined : { mimeType })
-          held.current = { recorder, chunks: [], stream, startedAt: Date.now(), voice }
+          const baseDraft = typeof draft === 'string' ? draft : ''
+          held.current = {
+            recorder,
+            chunks: [],
+            stream,
+            startedAt: Date.now(),
+            voice,
+            detector: new VoiceActivityDetector({ tickMs: METER_INTERVAL_MS }),
+          }
+          liveRef.current = {
+            base: baseDraft,
+            text: '',
+            written: false,
+            inFlight: false,
+            pending: false,
+            lastPeekAt: 0,
+          }
           // Ask the host to load the model NOW, while the user is still
           // speaking: that turns the model-load cost into time the recording
           // was going to take anyway, so the first transcript comes back
@@ -447,6 +664,7 @@ window.__ModuleLoader__.load({
             const detail = event !== null && event.error !== undefined && event.error !== null ? event.error.name : 'unknown error'
             releaseStream()
             releaseVoice()
+            liveRef.current = null
             setState({ phase: 'error', message: `The microphone recorder failed: ${detail}` })
           }
           recorder.onstop = () => {
@@ -454,10 +672,15 @@ window.__ModuleLoader__.load({
             releaseVoice()
             const chunks = held.current.chunks
             const type = recorder.mimeType === '' || recorder.mimeType === undefined ? 'audio/webm' : recorder.mimeType
-            held.current = { recorder: null, chunks: [], stream: null, startedAt: 0, voice: null }
+            held.current = { recorder: null, chunks: [], stream: null, startedAt: 0, voice: null, detector: null }
+            // The full recording is still submitted: it is what the final pass
+            // transcribes and polishes, and it is authoritative over every peek.
             void submitAudio(new Blob(chunks, { type }))
           }
-          recorder.start()
+          // A timeslice is what makes a live view possible at all: without it the
+          // browser hands over a single blob at `stop`, so there is nothing to
+          // decode while the user is still speaking.
+          recorder.start(CHUNK_MS)
           held.current.startedAt = Date.now()
           setState({ phase: 'recording', startedAt: held.current.startedAt })
         } catch (error) {
@@ -574,6 +797,7 @@ window.__ModuleLoader__.load({
     module.exports.VoiceMic = VoiceMic
     module.exports.levelFraction = levelFraction
     module.exports.applyFrameToDraft = applyFrameToDraft
+    module.exports.removeLiveText = removeLiveText
     return module.exports
   },
 })
