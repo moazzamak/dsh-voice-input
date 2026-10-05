@@ -85,15 +85,35 @@
         prewarm: true
         # Deadline for one transcription, in milliseconds.
         timeoutMs: 300000
-        # Clean the transcript once it is recognized: `conservative` removes
-        # filler and false starts, adds punctuation, and fixes obvious
-        # mishearings; `off` returns the recognizer's text untouched.
+        # Clean the transcript once it is recognized. Three modes:
+        #
+        #   conservative           clean WITHOUT spending reasoning tokens
+        #                          (the default, and the fast one)
+        #   conservative-reasoned  let the cleanup think, as it did before;
+        #                          slower, for quality-comparison A/B only
+        #   off                    return the recognizer's text untouched
         #
         # The cleanup uses the model this deployment already selects, so it needs
         # no second credential. It is strictly best-effort: any failure, timeout,
         # or implausibly large rewrite falls back to the raw transcript rather
         # than risk changing an instruction.
+        #
+        # TURNING IT OFF: set `polish: off` in your profile's cordis.patch.yml
+        # (copy this whole `config` block — a row's config is replaced, never
+        # deep-merged). Off is the right default for a deployment that wants the
+        # draft to contain nothing but the recognizer's own words.
         polish: conservative
+        # Reasoning effort for the cleanup call, one of off/low/high/max.
+        #
+        # LEAVE THIS AT off. A request that names no effort inherits the ADAPTER
+        # default, which is `high` on a deployment that configures none, and this
+        # plugin reads only text deltas — never reasoning deltas — so every
+        # thinking token is time the user waits while nothing appears in the
+        # draft, and the polishTimeoutMs deadline can expire before any cleaned
+        # text exists to return. Removing filler words is mechanical work; the
+        # reasoning buys nothing. `polish: conservative-reasoned` ignores this
+        # key and restores the inherit-the-default behaviour.
+        polishReasoning: off
         # Deadline for the cleanup call alone, in milliseconds.
         polishTimeoutMs: 15000
         # Pin the cleanup to a specific route instead of the current selection —

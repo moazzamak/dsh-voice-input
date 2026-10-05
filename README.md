@@ -130,6 +130,23 @@ Turn it off with `polish: off`, or pin it to a specific (small, cheap) route wit
 `polishProvider` + `polishModel` so cleanup does not ride the large model the agent is using.
 The `voice_transcribe` tool accepts `polish: false` per call.
 
+**The cleanup does not think, on purpose.** A model call that names no reasoning effort inherits
+the adapter's default, which is `high` on a deployment that configures none — and this plugin
+renders only text deltas, never reasoning deltas, so that entire phase is time the user spends
+waiting with nothing in the draft. Removing filler words is mechanical work, so the request asks
+the route not to reason (`polishReasoning: off`). On a route that cannot express that, the cleanup
+is retried once with the deployment's own default rather than being lost.
+
+| `polish` | Behaviour |
+| --- | --- |
+| `conservative` | clean without spending reasoning tokens — the default, and the fast one |
+| `conservative-reasoned` | let the cleanup think; slower, for comparison |
+| `off` | return the recognizer's text untouched |
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `polishReasoning` | `off` | Reasoning effort for the cleanup, one of `off`/`low`/`high`/`max`; ignored by `conservative-reasoned` |
+
 ### On any surface, as a tool
 
 The same engine is also a model-facing tool, so a CLI, SDK, or ACP session can transcribe

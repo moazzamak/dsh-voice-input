@@ -118,6 +118,7 @@ test('host config validation defaults every field and refuses bad values', async
       computeType: defaults.value.computeType,
       timeoutMs: defaults.value.timeoutMs,
       polish: defaults.value.polish,
+      polishReasoning: defaults.value.polishReasoning,
       polishTimeoutMs: defaults.value.polishTimeoutMs,
     },
     {
@@ -126,6 +127,9 @@ test('host config validation defaults every field and refuses bad values', async
       computeType: '',
       timeoutMs: 300_000,
       polish: 'conservative',
+      // Naming this effort is what keeps the cleanup fast: omitting it lets the
+      // adapter substitute `high`, and the plugin renders no reasoning deltas.
+      polishReasoning: 'off',
       polishTimeoutMs: 15_000,
     },
   )
