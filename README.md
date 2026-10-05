@@ -1,5 +1,7 @@
 # dsh-voice-input
 
+[![release](https://img.shields.io/github/v/release/moazzamak/dsh-voice-input?label=release)](https://github.com/moazzamak/dsh-voice-input/releases)
+
 Offline local speech-to-text for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) composer.
 
 A microphone button appears in the chat composer. Click it, speak, click again, and the
