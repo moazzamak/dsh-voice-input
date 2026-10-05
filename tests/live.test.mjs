@@ -53,12 +53,10 @@ test('the recorder produces pieces, not one blob at the end', () => {
   assert.ok(Number(chunkMs[1]) <= 2000, `a timeslice of ${chunkMs?.[1]} ms is too long to feel live`)
 })
 
-test('the live view reuses the tested span detector', () => {
+test('the live view carries the tested span detector', () => {
   const client = read('client.cjs')
-  assert.ok(
-    client.includes("require('dsh-voice-input/lib/vad.mjs')"),
-    'the client must use the same detector the host tests',
-  )
+  assert.ok(client.includes('BEGIN INLINED lib/vad.mjs'), 'the bundle must carry the detector')
+  assert.ok(client.includes('class VoiceActivityDetector'), 'and it must be the real one')
   assert.ok(client.includes('detector.observe(rms)'), 'the detector must be fed the raw level')
   assert.ok(
     client.includes("boundary.type === 'end'"),
@@ -68,6 +66,37 @@ test('the live view reuses the tested span detector', () => {
   const flushIndex = client.indexOf('void flushPeek()')
   const boundaryIndex = client.indexOf("boundary.type === 'end'")
   assert.ok(boundaryIndex !== -1 && flushIndex > boundaryIndex, 'the peek must follow the boundary test')
+  // A package subpath is not a specifier the client-module loader answers, so
+  // requiring one would throw while the bundle loaded and take the button with it.
+  assert.ok(
+    !/require\('dsh-voice-input/.test(client),
+    'the bundle must not require a subpath of its own package',
+  )
+})
+
+test('the inlined detector matches its module', () => {
+  // The module is the single source of truth; the bundle carries a mechanical
+  // copy of it. If they drift, the behaviour the tests prove is not the
+  // behaviour the browser runs, which is the worst of both.
+  const client = read('client.cjs')
+  const module = read('lib/vad.mjs')
+  const begin = client.indexOf('// --- BEGIN INLINED lib/vad.mjs')
+  const end = client.indexOf('// --- END INLINED lib/vad.mjs')
+  assert.ok(begin !== -1 && end > begin, 'the markers must be present')
+  const inlined = client.slice(begin, end)
+  // Every line of code the module defines must appear in the bundle, modulo the
+  // `export` keyword the transform removes and the indentation it adds.
+  const significant = module
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('*') && !line.startsWith('/*') && !line.startsWith('//'))
+    .map((line) => (line.startsWith('export ') ? line.slice(7) : line))
+  const missing = significant.filter((line) => !inlined.includes(line))
+  assert.deepEqual(
+    missing.slice(0, 5),
+    [],
+    `the bundle is stale: run \`node tools/inline-vad.mjs\` (${missing.length} line(s) out of date)`,
+  )
 })
 
 test('the caret marks work in flight and is removable', () => {
