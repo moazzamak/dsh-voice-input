@@ -730,6 +730,8 @@ window.__ModuleLoader__.load({
        * working live view becomes indistinguishable from one that never ran.
        */
       const spanNote = React.useRef(null)
+      /** Ticks of the unconditional diagnostic probe, so each write is distinguishable. */
+      let probeCount = 0
 
       const supported = recordingSupported()
 
@@ -1179,39 +1181,33 @@ window.__ModuleLoader__.load({
             lastPeekAt: 0,
             chunksAtPeek: 0,
           }
-          // DIAGNOSTIC: prove the composer can be updated AT ALL while recording.
+          // UNCONDITIONAL DIAGNOSTIC — no flag, nothing for anyone to enable.
           //
-          // Every layer of the live view had been verified in isolation — the
-          // route answers, the detector runs, `setDraft` works — and the draft
-          // still stayed empty, because nothing established the one fact the rest
-          // depended on: that writing to the draft DURING a recording reaches the
-          // chat box. This writes a known string on a timer, with no audio, no
-          // request and no transcription involved. If the numbers do not appear,
-          // no amount of correct plumbing downstream could ever have shown text.
-          //
-          // Enable with `localStorage.setItem('dsh-voice-debug', '1')` and reload,
-          // or append `#dsh-voice-debug` to the window's URL.
-          //
-          // The probe ANNOUNCES ITSELF, because a silent probe proves nothing: if
-          // the flag never took effect, an absent result would be read as "the
-          // chat box cannot be written to", which is the opposite of what it
-          // means. `debug on` beside the button says the probe is running;
-          // `setDraft wrote N chars` says the write was issued. Text or no text,
-          // those two lines make the result unambiguous.
-          if (debugEnabled()) {
-            setState({ phase: 'recording', startedAt: held.current.startedAt, note: 'debug on' })
-            const probe = setInterval(() => {
-              const live = liveRef.current
-              if (live === null || actions === undefined) return
-              live.text = `[debug ${live.text.length}]`
-              writeLiveDraft(true)
-              setState((previous) => ({
-                ...previous,
-                note: `setDraft wrote ${live.text.length} chars · draft now "${previous.note ?? ''}"`,
-              }))
-            }, 700)
-            held.current.debugProbe = probe
-          }
+          // A probe behind a flag proves nothing when it does not fire: an absent
+          // result reads as "the chat box refuses text while recording", when it
+          // may only mean the flag never took effect, and that misreading sends
+          // the next fix in the wrong direction. So this writes to the draft on a
+          // timer with no audio, no request and no transcription anywhere in the
+          // path, and says beside the button that it is doing so. It ships with
+          // the next release and comes out once the question is answered.
+          setState({
+            phase: 'recording',
+            startedAt: held.current.startedAt,
+            note: 'PROBE ON — writing to the draft every 700 ms',
+          })
+          const probe = setInterval(() => {
+            if (actions === undefined) return
+            // Straight at the composer, bypassing the live view's own bookkeeping:
+            // this asks exactly one question, whether the chat box can receive
+            // text at all while a recording is running.
+            probeCount += 1
+            actions.setDraft(`[probe ${probeCount}]`)
+            setState((previous) => ({
+              ...previous,
+              note: `PROBE: called setDraft with "[probe ${probeCount}]"`,
+            }))
+          }, 700)
+          held.current.debugProbe = probe
           // Ask the host to load the model NOW, while the user is still
           // speaking: that turns the model-load cost into time the recording
           // was going to take anyway, so the first transcript comes back
