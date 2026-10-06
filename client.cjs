@@ -981,9 +981,17 @@ window.__ModuleLoader__.load({
             const live = liveRef.current
             const snap = detector.snapshot()
             const sincePeek = live === null ? 0 : Date.now() - live.lastPeekAt
+            // How much text has actually reached the draft, which is the only way
+            // to tell raw recogniser output from cleaned output. This belongs on a
+            // line that is recomputed every tick: a note written once by the write
+            // itself is erased within a frame, so the one fact that answers the
+            // question was the one fact nobody could read.
+            const settled = live === null ? 0 : (live.text ?? '').length
+            const pending = live === null ? 0 : (live.pendingText ?? '').length
             note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
               + ` · ${held.current.chunks.length} chunk(s)`
               + ` · ${live !== null && live.inFlight ? 'decoding' : `${Math.round(sincePeek / 100) / 10}s idle`}`
+              + ` · draft ${settled}+${pending}`
               + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
           }
           if (note !== undefined) setState((previous) => ({ ...previous, note }))
