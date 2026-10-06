@@ -966,15 +966,25 @@ window.__ModuleLoader__.load({
             // detector was still deciding.
             levelPeak.current = Math.max(levelPeak.current, level)
             quietStreak.current = level > 0.006 ? 0 : quietStreak.current + 1
-            // A note is NOT written here any more. The peek is driven by a timer,
-            // and `flushPeek` reports its own outcome; a status line every 50 ms
-            // would erase that report before it could be read, which is how a
-            // live view that was working came to look like one that never ran.
-            if (liveRef.current?.inFlight !== true && spanNote.current === null) {
-              const snap = detector.snapshot()
-              note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
-                + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
-            }
+            // The status line CARRIES the evidence rather than being overwritten by
+            // it. This fires every 50 ms, so anything a peek writes here is erased
+            // within a frame — which is how a live view could be reporting a fault
+            // and still look idle. These facts cannot be erased, because they are
+            // recomputed and re-shown on every tick:
+            //
+            //   chunks    how much audio the recorder has actually handed over
+            //   last      how long since the last decode was asked for
+            //
+            // "0 chunks" after 10 seconds of speech is a recorder that never fired
+            // `ondataavailable`, which would explain an idle note with no peek:
+            // there is nothing to send, so nothing is ever sent.
+            const live = liveRef.current
+            const snap = detector.snapshot()
+            const sincePeek = live === null ? 0 : Date.now() - live.lastPeekAt
+            note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
+              + ` · ${held.current.chunks.length} chunk(s)`
+              + ` · ${live !== null && live.inFlight ? 'decoding' : `${Math.round(sincePeek / 100) / 10}s idle`}`
+              + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
           }
           if (note !== undefined) setState((previous) => ({ ...previous, note }))
           setQuiet(levelPeak.current <= 0.006 && quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
