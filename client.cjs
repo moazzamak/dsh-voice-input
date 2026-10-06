@@ -69,9 +69,29 @@ window.__ModuleLoader__.load({
 .${CLASS.error} { max-width: 320px; overflow: hidden; font-size: 11px; color: #e5484d; text-overflow: ellipsis; white-space: nowrap; }
 `
 
-    /** Install this bundle's stylesheet once per page and return its remover. */
+    /**
+     * Install this bundle's stylesheet once per page and return its remover.
+     *
+     * `data-plugin` is the harness client loader's ownership key for plugin
+     * styles: `claimStyles` marks every tag that lacks it as belonging to
+     * whichever plugin materialises next, and `removeOwnedStyles` deletes every
+     * tag whose `data-plugin` equals an id when that entry is replaced or
+     * pruned. A sheet marked only with a private `data-…` attribute therefore
+     * looks untagged, gets claimed by another plugin, and is deleted with it —
+     * which strips this bundle's styling and, for SVG, leaves shapes filling
+     * black. This sheet is injected during `apply`, after the loader's claim
+     * pass, so the plugin's own claim cannot see it either. `data-plugin-css`
+     * gives the sheet its own identity for the loader's bookkeeping and the
+     * duplicate guard below.
+     */
+    const STYLE_OWNER = 'dsh-voice-input'
+    const STYLE_KEY = `${STYLE_OWNER}/styles`
+
     function insertStyles() {
+      if (document.querySelector(`style[data-plugin-css="${STYLE_KEY}"]`) !== null) return () => {}
       const tag = document.createElement('style')
+      tag.dataset.plugin = STYLE_OWNER
+      tag.dataset.pluginCss = STYLE_KEY
       tag.dataset.dshVoiceInput = 'true'
       tag.textContent = CSS
       document.head.append(tag)
