@@ -438,7 +438,14 @@ window.__ModuleLoader__.load({
      * grows with its length. This is the throttle: enough new audio to be worth a
      * decode, without asking for a decode per chunk.
      */
-    const PEEK_EVERY_CHUNKS = 2
+    /**
+     * How long one peek may take before it is abandoned (~8 s).
+     *
+     * A decode grows with the recording, and a peek that never returns would hold
+     * the in-flight guard for the rest of the take, silently freezing the live
+     * view after its first slow decode.
+     */
+    const PEEK_TIMEOUT_MS = 8000
 
     /** Marks the live transcript inside the draft, and pulses while work is in flight. */
     const CARET = '\u258F'
@@ -888,7 +895,14 @@ window.__ModuleLoader__.load({
       const requestPeek = () => {
         const live = liveRef.current
         if (live === null || held.recorder === null) return
-        if (held.chunks.length - live.chunksAtPeek < PEEK_EVERY_CHUNKS) return
+        if (held.chunks.length === 0) return
+        // ONE new chunk is enough; the INTERVAL is what throttles, not the count.
+        // Requiring two was a silent deadlock: a short recording yields a single
+        // chunk, so `1 - 0 < 2` was never satisfied and the live view simply never
+        // asked. A peek costs a decode, so the time between peeks is the right
+        // knob, and counting chunks only re-introduced the same trap for a
+        // recording that hands over one piece.
+        if (Date.now() - live.lastPeekAt < PEEK_MIN_INTERVAL_MS) return
         flushPeek().catch((error) => {
           // A floating promise is what turned a hard ReferenceError into complete
           // silence once already. Failures must land somewhere.
@@ -901,13 +915,12 @@ window.__ModuleLoader__.load({
       }
 
       const flushPeek = async () => {
-        // The `held` ref is read straight from the enclosing scope. It used to be
-        // copied through `const held = heldRef.current` — reading a name that does
-        // not exist, which threw a ReferenceError on this very line. Because the
-        // caller invokes this as `void flushPeek()`, that rejection had nowhere to
-        // go: no request, no note, no caret, and not one symptom to say so. A
-        // fully wired live view looked exactly like one that had never been
-        // connected at all, which is what it was.
+        // The `held` ref is read straight from the enclosing scope. It once went
+        // through a local copy that named a variable which did not exist, and the
+        // resulting ReferenceError — thrown on this very line, inside a promise
+        // the caller discarded — produced no request, no note, no caret, and not
+        // one symptom to say so. A fully wired live view looked exactly like one
+        // that had never been connected, which is what it was.
         const live = liveRef.current
         if (live === null || held.recorder === null || held.chunks.length === 0) {
           // A silent early return here is what hid the problem: the boundary was
@@ -942,11 +955,19 @@ window.__ModuleLoader__.load({
           ...previous,
           note: `live view: sending ${Math.round(blob.size / 1024)} KB`,
         }))
+        // A deadline on the peek. Without one, a decode that hangs leaves
+        // `inFlight` true for the rest of the recording and every later peek is
+        // refused by the guard above — a live view that stops silently updating
+        // after its first slow decode, which is indistinguishable from one that
+        // never worked.
+        const abort = new AbortController()
+        const deadline = setTimeout(() => { abort.abort() }, PEEK_TIMEOUT_MS)
         try {
           const response = await fetch(SEGMENT_ROUTE, {
             method: 'POST',
             headers: { 'content-type': 'application/octet-stream' },
             body: blob,
+            signal: abort.signal,
           })
           const payload = await response.json().catch(() => ({}))
           // A peek that heard nothing changes nothing: the span may have been a
@@ -969,12 +990,10 @@ window.__ModuleLoader__.load({
           console.error('voice-input: live peek failed', error)
           setState((previous) => ({ ...previous, note: 'live view: request failed' }))
         } finally {
+          clearTimeout(deadline)
           live.inFlight = false
           // The peek has reported; let the per-tick status line come back.
           spanNote.current = null
-          // A visible transcript is worth waiting for; without this delay the
-          // loop would peek continuously and spend the whole recording decoding.
-          await new Promise((resolve) => { setTimeout(resolve, PEEK_MIN_INTERVAL_MS) })
           if (live.pending && liveRef.current !== null) { flushPeek().catch((error) => { console.error('voice-input: live peek threw', error) }) }
         }
       }

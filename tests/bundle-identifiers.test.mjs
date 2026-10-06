@@ -45,7 +45,7 @@ const REF_SUFFIX = /Ref$/
 function referenceSites(source) {
   const sites = []
   source.split('\n').forEach((line, index) => {
-    const code = line.replace(/\/\/.*$/, '')
+    const code = line.replace(/\/\/.*$/, '').replace(/[^]*/g, '')
     // Skip the generated, inlined detector: it is verified against its module by
     // `live.test.mjs`, and its identifiers come from there.
     for (const match of code.matchAll(/\b([A-Za-z_$][\w$]*)\.(current|\w+)/g)) {
