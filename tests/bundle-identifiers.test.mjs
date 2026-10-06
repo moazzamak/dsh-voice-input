@@ -101,3 +101,34 @@ test('the live path never discards the promise it starts', () => {
     `flushPeek must be invoked with a rejection handler (${bare.length} bare call(s) found)`,
   )
 })
+
+test('no ref is read without .current', () => {
+  const source = readFileSync(join(PACKAGE_DIR, 'client.cjs'), 'utf8')
+  const begin = source.indexOf('// --- BEGIN INLINED lib/vad.mjs')
+  const end = source.indexOf('// --- END INLINED lib/local-agreement.mjs')
+  const body = begin === -1 || end === -1 ? source : source.slice(0, begin) + source.slice(end)
+  const lines = body.split('\n')
+
+  // Every ref this bundle declares.
+  const refs = []
+  for (const match of body.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=\s*React\.useRef\(/g)) refs.push(match[1])
+  assert.ok(refs.length >= 4, `expected several refs in the bundle, found ${refs.length}`)
+
+  // A ref is an object, so its fields live under `.current`. Reading `held.chunks`
+  // yields undefined and the next `.length` throws — and because that throw lands
+  // in an event handler with no catch, the handler dies without a word. That is
+  // how the live view came to report "17 chunks" in one place and never send
+  // anything in another: the two read the same ref, and only one read it right.
+  const offenders = []
+  for (const ref of refs) {
+    const pattern = new RegExp(`(?<![.\\w])${ref}\\.(?!current)([A-Za-z_$][\\w$]*)`, 'g')
+    for (const match of body.matchAll(pattern)) {
+      const line = body.slice(0, match.index).split('\n').length
+      const text = (lines[line - 1] ?? '').trim()
+      // A comment can describe this mistake; it cannot make it.
+      if (text.startsWith('*') || text.startsWith('//')) continue
+      offenders.push(`${ref}.${match[1]} (line ${line}): ${text}`)
+    }
+  }
+  assert.deepEqual(offenders, [], 'a ref is read without .current — it will throw at runtime')
+})

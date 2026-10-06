@@ -1108,11 +1108,18 @@ window.__ModuleLoader__.load({
 
       const requestPeek = () => {
         const live = liveRef.current
-        if (live === null || held.recorder === null) {
+        // `held` is a REF, so every field lives under `.current`. Reading
+        // `held.chunks` directly yields `undefined`, and `undefined.length` throws
+        // — inside `ondataavailable`, which has no catch, so the handler died
+        // silently on every chunk and the peek never ran. The status line beside
+        // it read `held.current.chunks` correctly, which is what made the two
+        // disagree: one said 17 chunks, the other never spoke.
+        const heldNow = held.current
+        if (live === null || heldNow.recorder === null) {
           peekTrace('skipped: not recording')
           return
         }
-        if (held.chunks.length === 0) {
+        if (heldNow.chunks.length === 0) {
           peekTrace('skipped: no audio yet')
           return
         }
@@ -1123,7 +1130,7 @@ window.__ModuleLoader__.load({
         // than wrong, which reads like a broken pipeline instead of a short
         // window. One chunk is CHUNK_MS of audio, so this is a duration test, not
         // a count of arbitrary pieces.
-        const audioMs = held.chunks.length * CHUNK_MS
+        const audioMs = heldNow.chunks.length * CHUNK_MS
         if (audioMs < MIN_CHUNK_MS) {
           peekTrace(`waiting: ${Math.round(audioMs / 100) / 10}s of audio so far`)
           return
@@ -1144,17 +1151,17 @@ window.__ModuleLoader__.load({
       }
 
       const flushPeek = async () => {
-        // The `held` ref is read straight from the enclosing scope. It once went
-        // through a local copy that named a variable which did not exist, and the
-        // resulting ReferenceError — thrown on this very line, inside a promise
-        // the caller discarded — produced no request, no note, no caret, and not
-        // one symptom to say so. A fully wired live view looked exactly like one
-        // that had never been connected, which is what it was.
+        // `held` is a REF: every field lives under `.current`. Reading
+        // `held.recorder` or `held.chunks` directly yields `undefined`, and the
+        // next property access throws. That is the same mistake as the misspelled
+        // name that hid here before, one level subtler — the name exists, so
+        // nothing warns, and only the value is wrong.
         const live = liveRef.current
-        if (live === null || held.recorder === null || held.chunks.length === 0) {
+        const heldNow = held.current
+        if (live === null || heldNow.recorder === null || heldNow.chunks.length === 0) {
           const why = live === null
             ? 'not recording'
-            : held.recorder === null ? 'no recorder' : 'no audio captured yet'
+            : heldNow.recorder === null ? 'no recorder' : 'no audio captured yet'
           peekTrace(`stopped: ${why}`)
           return
         }
@@ -1163,10 +1170,10 @@ window.__ModuleLoader__.load({
           peekTrace('queued: one already in flight')
           return
         }
-        const type = held.recorder.mimeType === '' || held.recorder.mimeType === undefined
+        const type = heldNow.recorder.mimeType === '' || heldNow.recorder.mimeType === undefined
           ? 'audio/webm'
-          : held.recorder.mimeType
-        const blob = new Blob(held.chunks.slice(), { type })
+          : heldNow.recorder.mimeType
+        const blob = new Blob(heldNow.chunks.slice(), { type })
         if (blob.size === 0) {
           setState((previous) => ({ ...previous, note: 'live view: empty recording so far' }))
           return
@@ -1174,7 +1181,7 @@ window.__ModuleLoader__.load({
         live.inFlight = true
         live.pending = false
         live.lastPeekAt = Date.now()
-        live.chunksAtPeek = held.chunks.length
+        live.chunksAtPeek = heldNow.chunks.length
         peekTrace(`posted ${Math.round(blob.size / 1024)} KB`)
         // A deadline on the peek. Without one, a decode that hangs leaves
         // `inFlight` true for the rest of the recording and every later peek is
