@@ -636,6 +636,26 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Whether the live view's diagnostic probe is switched on.
+     *
+     * Off unless asked for, by `localStorage['dsh-voice-debug']` or a
+     * `#dsh-voice-debug` hash on the window's URL. The native window injects this
+     * bundle at launch, so a reload is what applies the setting — there is no
+     * console to set it from without devtools.
+     *
+     * @returns {boolean} true when the probe should run.
+     */
+    function debugEnabled() {
+      try {
+        if (typeof localStorage !== 'undefined' && localStorage.getItem('dsh-voice-debug') !== null) return true
+        if (typeof location !== 'undefined' && String(location.hash).includes('dsh-voice-debug')) return true
+      } catch {
+        // A locked-down storage or a sandboxed document simply means "off".
+      }
+      return false
+    }
+
     /** An audio-graph analyser if this browser can build one, else null. */
     function createAnalyser(stream) {
       const Ctor = globalThis.AudioContext ?? globalThis.webkitAudioContext
@@ -1159,6 +1179,27 @@ window.__ModuleLoader__.load({
             lastPeekAt: 0,
             chunksAtPeek: 0,
           }
+          // DIAGNOSTIC: prove the composer can be updated AT ALL while recording.
+          //
+          // Every layer of the live view had been verified in isolation — the
+          // route answers, the detector runs, `setDraft` works — and the draft
+          // still stayed empty, because nothing established the one fact the rest
+          // depended on: that writing to the draft DURING a recording reaches the
+          // chat box. This writes a known string on a timer, with no audio, no
+          // request and no transcription involved. If the numbers do not appear,
+          // no amount of correct plumbing downstream could ever have shown text.
+          //
+          // Enable with `localStorage.setItem('dsh-voice-debug', '1')` and reload,
+          // or append `#dsh-voice-debug` to the window's URL.
+          if (debugEnabled()) {
+            const probe = setInterval(() => {
+              const live = liveRef.current
+              if (live === null || actions === undefined) return
+              live.text = `[debug ${live.text.length}]`
+              writeLiveDraft(true)
+            }, 700)
+            held.current.debugProbe = probe
+          }
           // Ask the host to load the model NOW, while the user is still
           // speaking: that turns the model-load cost into time the recording
           // was going to take anyway, so the first transcript comes back
@@ -1193,6 +1234,7 @@ window.__ModuleLoader__.load({
             releaseVoice()
             const chunks = held.current.chunks
             const type = recorder.mimeType === '' || recorder.mimeType === undefined ? 'audio/webm' : recorder.mimeType
+            if (held.current.debugProbe !== undefined) clearInterval(held.current.debugProbe)
             held.current = { recorder: null, chunks: [], stream: null, startedAt: 0, voice: null, detector: null }
             // The full recording is still submitted: it is what the final pass
             // transcribes and polishes, and it is authoritative over every peek.
