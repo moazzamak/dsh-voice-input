@@ -1191,12 +1191,24 @@ window.__ModuleLoader__.load({
           //
           // Enable with `localStorage.setItem('dsh-voice-debug', '1')` and reload,
           // or append `#dsh-voice-debug` to the window's URL.
+          //
+          // The probe ANNOUNCES ITSELF, because a silent probe proves nothing: if
+          // the flag never took effect, an absent result would be read as "the
+          // chat box cannot be written to", which is the opposite of what it
+          // means. `debug on` beside the button says the probe is running;
+          // `setDraft wrote N chars` says the write was issued. Text or no text,
+          // those two lines make the result unambiguous.
           if (debugEnabled()) {
+            setState({ phase: 'recording', startedAt: held.current.startedAt, note: 'debug on' })
             const probe = setInterval(() => {
               const live = liveRef.current
               if (live === null || actions === undefined) return
               live.text = `[debug ${live.text.length}]`
               writeLiveDraft(true)
+              setState((previous) => ({
+                ...previous,
+                note: `setDraft wrote ${live.text.length} chars · draft now "${previous.note ?? ''}"`,
+              }))
             }, 700)
             held.current.debugProbe = probe
           }
