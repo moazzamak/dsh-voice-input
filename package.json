@@ -25,7 +25,8 @@
     "./python/worker.py": "./python/worker.py",
     "./python/transcribe.py": "./python/transcribe.py",
     "./python/setup.py": "./python/setup.py",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./lib/local-agreement.mjs": "./lib/local-agreement.mjs"
   },
   "files": [
     "index.mjs",
@@ -39,7 +40,8 @@
     "engine/bin/whisper-server.exe",
     "engine/LICENSE-whisper.cpp.txt",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "lib/local-agreement.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -53,7 +55,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/contract.test.mjs tests/polish.test.mjs tests/vad.test.mjs tests/live.test.mjs tests/bundle-identifiers.test.mjs",
+    "test": "node --test tests/contract.test.mjs tests/polish.test.mjs tests/vad.test.mjs tests/live.test.mjs tests/bundle-identifiers.test.mjs tests/local-agreement.test.mjs",
     "check:browser": "node tools/cdp-check.mjs"
   }
 }
