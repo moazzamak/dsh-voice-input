@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-input",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Offline local speech-to-text for the DeepSeek Harness composer: a microphone button that records, transcribes on your own machine (GPU via whisper.cpp/Vulkan where available), streams the text into the chat draft, and keeps the model resident between recordings.",
   "type": "module",
   "license": "MIT",
