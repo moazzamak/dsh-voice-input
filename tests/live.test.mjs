@@ -67,9 +67,21 @@ test('the live view carries the tested span detector', () => {
     /ondataavailable[\s\S]{0,2000}requestPeek\(\)/.test(client),
     'the peek must be triggered where the audio actually arrives',
   )
-  // The detector still feeds the muted-microphone hint, which is the one thing
-  // it is still trusted for.
-  assert.ok(client.includes('detector.snapshot()'), 'the status line still reports the detector')
+  // The detector still feeds the muted-microphone hint, which is the one thing it
+  // is trusted for now, and that hint is derived from the audio rather than from
+  // any span state.
+  assert.ok(client.includes('setQuiet('), 'the muted-microphone hint must survive')
+  // And nothing else. The floor, the gate, the chunk count and the draft size were
+  // instrumentation: they answered how the live view was working, and once it
+  // worked they were noise in the one place the user is trying to read. This
+  // asserts they stay gone rather than creeping back in. The check is scoped to
+  // the hand-written half, because the inlined modules legitimately describe such
+  // things in their own documentation.
+  const inlined = client.indexOf('// --- BEGIN INLINED lib/vad.mjs')
+  const handWritten = inlined === -1 ? client : client.slice(0, inlined)
+  for (const gone of ['listening — floor', 'chunk(s)', 'PEEK ', 'peekTrace', 'settled,']) {
+    assert.ok(!handWritten.includes(gone), `instrumentation must not ship: found "${gone}"`)
+  }
   // A package subpath is not a specifier the client-module loader answers, so
   // requiring one would throw while the bundle loaded and take the button with it.
   assert.ok(

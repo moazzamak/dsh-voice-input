@@ -567,16 +567,6 @@ window.__ModuleLoader__.load({
     const SLOT = 'conversation.input.left'
     const ENTRY_ID = 'voice-input-microphone'
 
-    /**
-     * Build marker, shown beside the button while recording.
-     *
-     * The native window injects this bundle at LAUNCH, so an edit here does not
-     * reach a window that is already open. Without a marker, "the fix is not
-     * loaded yet" and "the fix does not work" look identical from the outside —
-     * and telling those two apart is the whole difficulty.
-     */
-    const BUILD = '0.4.0+live'
-
     /** Meter geometry, and how often the analyser is sampled. */
     const METER_BARS = 14
     // 50 ms keeps the meter reading as motion (20 fps) rather than as a series
@@ -886,15 +876,6 @@ window.__ModuleLoader__.load({
        * perfectly good recording.
        */
       const levelPeak = React.useRef(0)
-      /**
-       * What the last closed span reported, or null while none has closed yet.
-       *
-       * Kept in a ref rather than in the note itself because the per-tick status
-       * line runs every 50 ms: without a record of "a span has closed", the
-       * status line overwrites the peek's result before it can be read, and a
-       * working live view becomes indistinguishable from one that never ran.
-       */
-      const spanNote = React.useRef(null)
 
       const supported = recordingSupported()
 
@@ -953,12 +934,11 @@ window.__ModuleLoader__.load({
           // detector is fed the raw RMS and measures the floor itself. A fridge,
           // a fan or a laptop under load would permanently defeat any fixed line.
           const detector = held.current.detector
-          let note
           if (detector === null) {
             quietStreak.current = level <= 0.1 ? quietStreak.current + 1 : 0
           } else {
             detector.observe(rms)
-            const boundary = detector.advance()
+            detector.advance()
             // Whether the user can be heard is a question about the AUDIO, not
             // about the detector: the hint answers "is this microphone dead", and
             // the detector answers "has a spoken span ended". Tying the first to
@@ -966,35 +946,7 @@ window.__ModuleLoader__.load({
             // detector was still deciding.
             levelPeak.current = Math.max(levelPeak.current, level)
             quietStreak.current = level > 0.006 ? 0 : quietStreak.current + 1
-            // The status line CARRIES the evidence rather than being overwritten by
-            // it. This fires every 50 ms, so anything a peek writes here is erased
-            // within a frame — which is how a live view could be reporting a fault
-            // and still look idle. These facts cannot be erased, because they are
-            // recomputed and re-shown on every tick:
-            //
-            //   chunks    how much audio the recorder has actually handed over
-            //   last      how long since the last decode was asked for
-            //
-            // "0 chunks" after 10 seconds of speech is a recorder that never fired
-            // `ondataavailable`, which would explain an idle note with no peek:
-            // there is nothing to send, so nothing is ever sent.
-            const live = liveRef.current
-            const snap = detector.snapshot()
-            const sincePeek = live === null ? 0 : Date.now() - live.lastPeekAt
-            // How much text has actually reached the draft, which is the only way
-            // to tell raw recogniser output from cleaned output. This belongs on a
-            // line that is recomputed every tick: a note written once by the write
-            // itself is erased within a frame, so the one fact that answers the
-            // question was the one fact nobody could read.
-            const settled = live === null ? 0 : (live.text ?? '').length
-            const pending = live === null ? 0 : (live.pendingText ?? '').length
-            note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
-              + ` · ${held.current.chunks.length} chunk(s)`
-              + ` · ${live !== null && live.inFlight ? 'decoding' : `${Math.round(sincePeek / 100) / 10}s idle`}`
-              + ` · draft ${settled}+${pending}`
-              + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
           }
-          if (note !== undefined) setState((previous) => ({ ...previous, note }))
           setQuiet(levelPeak.current <= 0.006 && quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
         }
         const dispose = startLevelLoop(tick, METER_INTERVAL_MS)
@@ -1045,10 +997,6 @@ window.__ModuleLoader__.load({
         const shown = active ? `${tail}${CARET}` : tail
         const separator = live.base === '' || /\s$/.test(live.base) ? '' : ' '
         actions.setDraft(live.base + separator + shown)
-        setState((previous) => ({
-          ...previous,
-          note: `live view: ${live.text.length} settled, ${(live.pendingText ?? '').length} pending`,
-        }))
       }
 
       /**
@@ -1100,37 +1048,22 @@ window.__ModuleLoader__.load({
        * the honest bound on it belongs in the README rather than in silence.
        */
       /**
-       * Say what the peek chain is doing, beside the button.
+       * Ask for a decode of the audio captured so far.
        *
-       * Every step of this chain used to fail silently, and a silent step is
-       * indistinguishable from a step that never ran — which is what made this
-       * take so long to find. The specific question now is where the text is
-       * lost: in the chunk reaching the route, in the answer coming back, or in
-       * the write. Each link says which one it is.
-       *
-       * @param {string} what - the step, in the words a reader would use.
+       * Called every time the recorder hands over a chunk. The whole recording is
+       * sent each time and the host returns the transcript of all of it, which is
+       * why no overlap stitching is needed: each answer is a complete reading of
+       * the audio, not a fragment to be aligned with the last one.
        */
-      const peekTrace = (what) => {
-        setState((previous) => ({ ...previous, note: `PEEK ${what}` }))
-      }
-
       const requestPeek = () => {
         const live = liveRef.current
         // `held` is a REF, so every field lives under `.current`. Reading
-        // `held.chunks` directly yields `undefined`, and `undefined.length` throws
+        // `held.chunks` directly yields `undefined`, and the next `.length` throws
         // — inside `ondataavailable`, which has no catch, so the handler died
-        // silently on every chunk and the peek never ran. The status line beside
-        // it read `held.current.chunks` correctly, which is what made the two
-        // disagree: one said 17 chunks, the other never spoke.
+        // silently on every chunk and no peek ever ran.
         const heldNow = held.current
-        if (live === null || heldNow.recorder === null) {
-          peekTrace('skipped: not recording')
-          return
-        }
-        if (heldNow.chunks.length === 0) {
-          peekTrace('skipped: no audio yet')
-          return
-        }
+        if (live === null || heldNow.recorder === null) return
+        if (heldNow.chunks.length === 0) return
         // Wait for about a second of audio, which is the reference
         // implementation's `--min-chunk-size 1.0`. Below that a decode has too
         // little context to return anything useful — the recogniser needs to hear
@@ -1140,21 +1073,17 @@ window.__ModuleLoader__.load({
         // a count of arbitrary pieces.
         const audioMs = heldNow.chunks.length * CHUNK_MS
         if (audioMs < MIN_CHUNK_MS) {
-          peekTrace(`waiting: ${Math.round(audioMs / 100) / 10}s of audio so far`)
           return
         }
         // A floor on the gap as well, so a burst of chunks cannot queue a decode
         // per chunk: each peek re-reads the whole recording.
         if (Date.now() - live.lastPeekAt < PEEK_MIN_INTERVAL_MS) {
-          peekTrace(`waiting: ${Math.round(audioMs / 100) / 10}s of audio, ${Math.round((Date.now() - live.lastPeekAt) / 100) / 10}s since the last decode`)
           return
         }
-        peekTrace(`sending ${Math.round(audioMs / 100) / 10}s of audio`)
         flushPeek().catch((error) => {
           // A floating promise is what turned a hard ReferenceError into complete
           // silence once already. Failures must land somewhere.
           console.error('voice-input: live peek threw', error)
-          peekTrace(`threw: ${error && error.message ? error.message : String(error)}`)
         })
       }
 
@@ -1170,27 +1099,21 @@ window.__ModuleLoader__.load({
           const why = live === null
             ? 'not recording'
             : heldNow.recorder === null ? 'no recorder' : 'no audio captured yet'
-          peekTrace(`stopped: ${why}`)
           return
         }
         if (live.inFlight) {
           live.pending = true
-          peekTrace('queued: one already in flight')
           return
         }
         const type = heldNow.recorder.mimeType === '' || heldNow.recorder.mimeType === undefined
           ? 'audio/webm'
           : heldNow.recorder.mimeType
         const blob = new Blob(heldNow.chunks.slice(), { type })
-        if (blob.size === 0) {
-          setState((previous) => ({ ...previous, note: 'live view: empty recording so far' }))
-          return
-        }
+        if (blob.size === 0) return
         live.inFlight = true
         live.pending = false
         live.lastPeekAt = Date.now()
         live.chunksAtPeek = heldNow.chunks.length
-        peekTrace(`posted ${Math.round(blob.size / 1024)} KB`)
         // A deadline on the peek. Without one, a decode that hangs leaves
         // `inFlight` true for the rest of the recording and every later peek is
         // refused by the guard above — a live view that stops silently updating
@@ -1218,7 +1141,6 @@ window.__ModuleLoader__.load({
             live.pendingText = agreed.pending
             live.written = true
             writeLiveDraft(true)
-            peekTrace(`got "${payload.text.trim().length} chars"; settled ${agreed.confirmed.length}, pending ${agreed.pending.length}`)
           } else {
             // NOTHING about a peek may be silent. A reply that carries no text is
             // the most important thing to report: it says the request reached the
@@ -1227,16 +1149,13 @@ window.__ModuleLoader__.load({
             const reason = typeof payload.error === 'string' && payload.error !== ''
               ? payload.error
               : `HTTP ${response.status} and no text`
-            peekTrace(`reply had no text: ${reason}`)
           }
         } catch (error) {
           console.error('voice-input: live peek failed', error)
-          peekTrace(`failed: ${error && error.message ? error.message : String(error)}`)
         } finally {
           clearTimeout(deadline)
           live.inFlight = false
           // The peek has reported; let the per-tick status line come back.
-          spanNote.current = null
           if (live.pending && liveRef.current !== null) { flushPeek().catch((error) => { console.error('voice-input: live peek threw', error) }) }
         }
       }
@@ -1358,7 +1277,6 @@ window.__ModuleLoader__.load({
         levelPeak.current = 0
         // And each recording reports its own spans: a note left over from the
         // previous take would suppress this one's status line entirely.
-        spanNote.current = null
       }
 
       const finishRecording = () => {
@@ -1412,7 +1330,7 @@ window.__ModuleLoader__.load({
           // demonstrably accepts text while a recording runs, and every remaining
           // fault is downstream of it. Left in place it would overwrite the live
           // transcript on every recording.
-          setState({ phase: 'recording', startedAt: held.current.startedAt, note: 'live view on' })
+          setState({ phase: 'recording', startedAt: held.current.startedAt })
           // Ask the host to load the model NOW, while the user is still
           // speaking: that turns the model-load cost into time the recording
           // was going to take anyway, so the first transcript comes back
@@ -1457,7 +1375,7 @@ window.__ModuleLoader__.load({
           // decode while the user is still speaking.
           recorder.start(CHUNK_MS)
           held.current.startedAt = Date.now()
-          setState({ phase: 'recording', startedAt: held.current.startedAt, note: `${BUILD} — live view on` })
+          setState({ phase: 'recording', startedAt: held.current.startedAt })
         } catch (error) {
           releaseStream()
           releaseVoice()
