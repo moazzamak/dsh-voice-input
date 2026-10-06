@@ -372,6 +372,16 @@ window.__ModuleLoader__.load({
     const SLOT = 'conversation.input.left'
     const ENTRY_ID = 'voice-input-microphone'
 
+    /**
+     * Build marker, shown beside the button while recording.
+     *
+     * The native window injects this bundle at LAUNCH, so an edit here does not
+     * reach a window that is already open. Without a marker, "the fix is not
+     * loaded yet" and "the fix does not work" look identical from the outside —
+     * and telling those two apart is the whole difficulty.
+     */
+    const BUILD = '0.4.0+live'
+
     /** Meter geometry, and how often the analyser is sampled. */
     const METER_BARS = 14
     // 50 ms keeps the meter reading as motion (20 fps) rather than as a series
@@ -653,6 +663,15 @@ window.__ModuleLoader__.load({
        * perfectly good recording.
        */
       const levelPeak = React.useRef(0)
+      /**
+       * What the last closed span reported, or null while none has closed yet.
+       *
+       * Kept in a ref rather than in the note itself because the per-tick status
+       * line runs every 50 ms: without a record of "a span has closed", the
+       * status line overwrites the peek's result before it can be read, and a
+       * working live view becomes indistinguishable from one that never ran.
+       */
+      const spanNote = React.useRef(null)
 
       const supported = recordingSupported()
 
@@ -711,6 +730,7 @@ window.__ModuleLoader__.load({
           // detector is fed the raw RMS and measures the floor itself. A fridge,
           // a fan or a laptop under load would permanently defeat any fixed line.
           const detector = held.current.detector
+          let note
           if (detector === null) {
             quietStreak.current = level <= 0.1 ? quietStreak.current + 1 : 0
           } else {
@@ -723,11 +743,44 @@ window.__ModuleLoader__.load({
             // detector was still deciding.
             levelPeak.current = Math.max(levelPeak.current, level)
             quietStreak.current = level > 0.006 ? 0 : quietStreak.current + 1
-            // A span just closed, so the room is quiet and this is a safe place
-            // to cut: everything captured so far can be decoded without the
-            // recognizer inventing an ending for a half-spoken word.
-            if (boundary !== null && boundary.type === 'end') void flushPeek()
+            if (boundary !== null && boundary.type === 'end') {
+              // The DECISION is reported, not only the request it leads to.
+              // Everything downstream stays silent when this never fires — no
+              // peek, no text, no caret, no error — which is how a working
+              // detector and an unwired one came to look identical.
+              spanNote.current = `live view: span closed (${Math.round(boundary.speechMs)} ms of speech)`
+              note = spanNote.current
+              // `void` discards the promise, so ANY throw inside the peek becomes
+              // an unhandled rejection with no route to the user. A single
+              // misspelled identifier on the function's first line threw on every
+              // call and produced no symptom at all — no request, no note, no
+              // caret — which is how a fully wired live view came to look exactly
+              // like one that was never connected. Failures must land somewhere.
+              flushPeek().catch((error) => {
+                console.error('voice-input: live peek threw', error)
+                setState((previous) => ({
+                  ...previous,
+                  note: `live view: ${error && error.message ? error.message : String(error)}`,
+                }))
+              })
+            } else if (liveRef.current?.inFlight !== true && spanNote.current === null) {
+              // Idle between peeks: report the live state, and the numbers that
+              // decide it. A gate the speaker never crosses is the one failure
+              // that produces no other symptom at all, so it is worth showing.
+              //
+              // SUPPRESSED once a span has closed. This line fires every 50 ms,
+              // so leaving it running would erase the peek's own result before
+              // anyone could read it — which is exactly how a live view that was
+              // working looked identical to one that never ran at all.
+              const snap = detector.snapshot()
+              note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
+                + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
+            }
           }
+          // ONE note per tick, unless a peek is mid-flight and owns it: a
+          // status write here would otherwise erase the peek's own result before
+          // it could be read.
+          if (note !== undefined) setState((previous) => ({ ...previous, note }))
           setQuiet(levelPeak.current <= 0.006 && quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
         }
         const dispose = startLevelLoop(tick, METER_INTERVAL_MS)
@@ -774,6 +827,14 @@ window.__ModuleLoader__.load({
         const tail = active ? live.text + CARET : live.text
         const separator = live.base === '' || /\s$/.test(live.base) ? '' : ' '
         actions.setDraft(live.base + separator + tail)
+        // Report the write as well as the request. `setDraft` is a Lexical
+        // transaction against someone else's editor, and a draft that accepts the
+        // text while the composer shows something else would otherwise look
+        // exactly like a peek that never arrived.
+        setState((previous) => ({
+          ...previous,
+          note: `live view: ${live.text.length} chars in draft`,
+        }))
       }
 
       /**
@@ -805,9 +866,25 @@ window.__ModuleLoader__.load({
        * the half-word the cut landed in.
        */
       const flushPeek = async () => {
-        const held = heldRef.current
+        // The `held` ref is read straight from the enclosing scope. It used to be
+        // copied through `const held = heldRef.current` — reading a name that does
+        // not exist, which threw a ReferenceError on this very line. Because the
+        // caller invokes this as `void flushPeek()`, that rejection had nowhere to
+        // go: no request, no note, no caret, and not one symptom to say so. A
+        // fully wired live view looked exactly like one that had never been
+        // connected at all, which is what it was.
         const live = liveRef.current
-        if (live === null || held.recorder === null || held.chunks.length === 0) return
+        if (live === null || held.recorder === null || held.chunks.length === 0) {
+          // A silent early return here is what hid the problem: the boundary was
+          // detected, the peek was attempted, and nothing whatsoever was
+          // reported, so a failing live view looked exactly like one that was
+          // never wired up. Whatever stops a peek now says so.
+          const why = live === null
+            ? 'not recording'
+            : held.recorder === null ? 'no recorder' : 'no audio captured yet'
+          setState((previous) => ({ ...previous, note: `live view: ${why}` }))
+          return
+        }
         if (live.inFlight) {
           live.pending = true
           return
@@ -816,10 +893,19 @@ window.__ModuleLoader__.load({
           ? 'audio/webm'
           : held.recorder.mimeType
         const blob = new Blob(held.chunks.slice(), { type })
-        if (blob.size === 0) return
+        if (blob.size === 0) {
+          setState((previous) => ({ ...previous, note: 'live view: empty recording so far' }))
+          return
+        }
         live.inFlight = true
         live.pending = false
         live.lastPeekAt = Date.now()
+        // Say that a peek is in flight, and how much audio it carries: a note
+        // that never changes is itself the finding.
+        setState((previous) => ({
+          ...previous,
+          note: `live view: sending ${Math.round(blob.size / 1024)} KB`,
+        }))
         try {
           const response = await fetch(SEGMENT_ROUTE, {
             method: 'POST',
@@ -833,24 +919,27 @@ window.__ModuleLoader__.load({
             live.text = payload.text.trim()
             live.written = true
             writeLiveDraft(true)
-          } else if (response.status !== 502) {
-            // A 502 is one span the decoder could not answer, which the next span
-            // retries. Anything else — a 404 from a host that never registered
-            // this route, a 401 from the browser-trust fence — will fail on every
-            // span, so it has to be SAID. The composer has no console the user
-            // can read, and a silent live view is indistinguishable from a broken
-            // one, which is exactly how this was found the hard way.
-            setState((previous) => ({ ...previous, note: `live view unavailable (HTTP ${response.status})` }))
+          } else {
+            // NOTHING about a peek may be silent. Every outcome writes a note
+            // beside the button, while the recording is still running, because
+            // "the live view did nothing" and "the live view was never asked"
+            // are indistinguishable from the draft alone.
+            const reason = typeof payload.error === 'string' && payload.error !== ''
+              ? payload.error
+              : `HTTP ${response.status}`
+            setState((previous) => ({ ...previous, note: `live view: ${reason}` }))
           }
         } catch (error) {
           console.error('voice-input: live peek failed', error)
-          setState((previous) => ({ ...previous, note: 'live view unavailable' }))
+          setState((previous) => ({ ...previous, note: 'live view: request failed' }))
         } finally {
           live.inFlight = false
+          // The peek has reported; let the per-tick status line come back.
+          spanNote.current = null
           // A visible transcript is worth waiting for; without this delay the
           // loop would peek continuously and spend the whole recording decoding.
           await new Promise((resolve) => { setTimeout(resolve, PEEK_MIN_INTERVAL_MS) })
-          if (live.pending && liveRef.current !== null) void flushPeek()
+          if (live.pending && liveRef.current !== null) { flushPeek().catch((error) => { console.error('voice-input: live peek threw', error) }) }
         }
       }
 
@@ -969,6 +1058,9 @@ window.__ModuleLoader__.load({
         // Each recording is judged on its own audio: a previous take that was
         // loud must not mask a microphone that has since been muted.
         levelPeak.current = 0
+        // And each recording reports its own spans: a note left over from the
+        // previous take would suppress this one's status line entirely.
+        spanNote.current = null
       }
 
       const finishRecording = () => {
@@ -1047,7 +1139,7 @@ window.__ModuleLoader__.load({
           // decode while the user is still speaking.
           recorder.start(CHUNK_MS)
           held.current.startedAt = Date.now()
-          setState({ phase: 'recording', startedAt: held.current.startedAt })
+          setState({ phase: 'recording', startedAt: held.current.startedAt, note: `${BUILD} — live view on` })
         } catch (error) {
           releaseStream()
           releaseVoice()
@@ -1112,9 +1204,11 @@ window.__ModuleLoader__.load({
           key: 'error', className: CLASS.error, role: 'status', title: state.message,
         }, state.message))
       }
-      if (phase === 'idle' && state.note !== undefined) {
-        // A quiet marker, not a notice: the text is already in the draft, and
-        // this only says a cleanup pass ran on the way there.
+      if (state.note !== undefined && (phase === 'idle' || phase === 'recording' || phase === 'transcribing')) {
+        // Shown while the recording is RUNNING, not only when it is over. A
+        // failure note that appears after the fact cannot tell the user whether
+        // the live view was attempted at all, and that was the whole difficulty
+        // in finding out why it did nothing.
         children.push(React.createElement('span', {
           key: 'note', className: CLASS.note, role: 'status',
         }, state.note))
