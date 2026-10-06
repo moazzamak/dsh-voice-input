@@ -914,25 +914,47 @@ window.__ModuleLoader__.load({
        * instruction that is a handful of decodes; for a monologue it is more, and
        * the honest bound on it belongs in the README rather than in silence.
        */
+      /**
+       * Say what the peek chain is doing, beside the button.
+       *
+       * Every step of this chain used to fail silently, and a silent step is
+       * indistinguishable from a step that never ran — which is what made this
+       * take so long to find. The specific question now is where the text is
+       * lost: in the chunk reaching the route, in the answer coming back, or in
+       * the write. Each link says which one it is.
+       *
+       * @param {string} what - the step, in the words a reader would use.
+       */
+      const peekTrace = (what) => {
+        setState((previous) => ({ ...previous, note: `PEEK ${what}` }))
+      }
+
       const requestPeek = () => {
         const live = liveRef.current
-        if (live === null || held.recorder === null) return
-        if (held.chunks.length === 0) return
+        if (live === null || held.recorder === null) {
+          peekTrace('skipped: not recording')
+          return
+        }
+        if (held.chunks.length === 0) {
+          peekTrace('skipped: no audio yet')
+          return
+        }
         // ONE new chunk is enough; the INTERVAL is what throttles, not the count.
         // Requiring two was a silent deadlock: a short recording yields a single
         // chunk, so `1 - 0 < 2` was never satisfied and the live view simply never
         // asked. A peek costs a decode, so the time between peeks is the right
         // knob, and counting chunks only re-introduced the same trap for a
         // recording that hands over one piece.
-        if (Date.now() - live.lastPeekAt < PEEK_MIN_INTERVAL_MS) return
+        if (Date.now() - live.lastPeekAt < PEEK_MIN_INTERVAL_MS) {
+          peekTrace(`waiting: ${held.chunks.length} chunk(s), ${Math.round((Date.now() - live.lastPeekAt) / 100) / 10}s since last`)
+          return
+        }
+        peekTrace(`sending ${held.chunks.length} chunk(s)`)
         flushPeek().catch((error) => {
           // A floating promise is what turned a hard ReferenceError into complete
           // silence once already. Failures must land somewhere.
           console.error('voice-input: live peek threw', error)
-          setState((previous) => ({
-            ...previous,
-            note: `live view: ${error && error.message ? error.message : String(error)}`,
-          }))
+          peekTrace(`threw: ${error && error.message ? error.message : String(error)}`)
         })
       }
 
@@ -945,18 +967,15 @@ window.__ModuleLoader__.load({
         // that had never been connected, which is what it was.
         const live = liveRef.current
         if (live === null || held.recorder === null || held.chunks.length === 0) {
-          // A silent early return here is what hid the problem: the boundary was
-          // detected, the peek was attempted, and nothing whatsoever was
-          // reported, so a failing live view looked exactly like one that was
-          // never wired up. Whatever stops a peek now says so.
           const why = live === null
             ? 'not recording'
             : held.recorder === null ? 'no recorder' : 'no audio captured yet'
-          setState((previous) => ({ ...previous, note: `live view: ${why}` }))
+          peekTrace(`stopped: ${why}`)
           return
         }
         if (live.inFlight) {
           live.pending = true
+          peekTrace('queued: one already in flight')
           return
         }
         const type = held.recorder.mimeType === '' || held.recorder.mimeType === undefined
@@ -971,12 +990,7 @@ window.__ModuleLoader__.load({
         live.pending = false
         live.lastPeekAt = Date.now()
         live.chunksAtPeek = held.chunks.length
-        // Say that a peek is in flight, and how much audio it carries: a note
-        // that never changes is itself the finding.
-        setState((previous) => ({
-          ...previous,
-          note: `live view: sending ${Math.round(blob.size / 1024)} KB`,
-        }))
+        peekTrace(`posted ${Math.round(blob.size / 1024)} KB`)
         // A deadline on the peek. Without one, a decode that hangs leaves
         // `inFlight` true for the rest of the recording and every later peek is
         // refused by the guard above — a live view that stops silently updating
@@ -998,19 +1012,20 @@ window.__ModuleLoader__.load({
             live.text = payload.text.trim()
             live.written = true
             writeLiveDraft(true)
+            peekTrace(`got ${payload.text.trim().length} chars, wrote to the draft`)
           } else {
-            // NOTHING about a peek may be silent. Every outcome writes a note
-            // beside the button, while the recording is still running, because
-            // "the live view did nothing" and "the live view was never asked"
-            // are indistinguishable from the draft alone.
+            // NOTHING about a peek may be silent. A reply that carries no text is
+            // the most important thing to report: it says the request reached the
+            // route and the DECODER found nothing in the audio, which is a
+            // different fault from a request that never left.
             const reason = typeof payload.error === 'string' && payload.error !== ''
               ? payload.error
-              : `HTTP ${response.status}`
-            setState((previous) => ({ ...previous, note: `live view: ${reason}` }))
+              : `HTTP ${response.status} and no text`
+            peekTrace(`reply had no text: ${reason}`)
           }
         } catch (error) {
           console.error('voice-input: live peek failed', error)
-          setState((previous) => ({ ...previous, note: 'live view: request failed' }))
+          peekTrace(`failed: ${error && error.message ? error.message : String(error)}`)
         } finally {
           clearTimeout(deadline)
           live.inFlight = false
