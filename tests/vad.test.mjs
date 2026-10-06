@@ -190,6 +190,32 @@ test('the gate never closes on a muted microphone', () => {
   assert.ok(detector.noiseFloor > 0, 'the floor must stay above zero')
 })
 
+test('a hum louder than the gate is counted as speech, and that no longer matters', () => {
+  // A KNOWN LIMITATION, pinned here so nobody rediscovers it as a bug.
+  //
+  // The gate is derived from a floor the detector estimates, and that estimate
+  // can sit below the room: a quiet moment seeds it, or the room's hum is simply
+  // louder than the quietest thing it ever heard. A hum ABOVE the gate is then
+  // indistinguishable from a voice, no silence is ever seen, and the span never
+  // closes.
+  //
+  // This was fatal when a closed span was what triggered transcription: the user
+  // talked, paused, and nothing was ever sent, with no error to explain it. The
+  // live view no longer asks the detector anything — it submits a rolling window
+  // of audio on a timer — so a span that never closes costs nothing. What relies
+  // on the detector now is only the muted-microphone hint, and that reads the
+  // level directly rather than the span state.
+  const { events, detector } = drive([
+    ...room(SILENT_ROOM, 100),
+    ...speech(SPEAKING, 60),
+    ...room(0.012, 200),            // a hum well above the gate
+  ])
+  const ends = events.filter((event) => event.type === 'end')
+  assert.equal(ends.length, 0, 'the detector cannot close this span - the live view must not depend on it')
+  assert.ok(detector.speaking, 'and it still believes someone is talking')
+  assert.ok(detector.gate < 0.012, `the hum is above the gate (${detector.gate.toFixed(4)})`)
+})
+
 
 
 

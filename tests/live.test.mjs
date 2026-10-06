@@ -58,14 +58,18 @@ test('the live view carries the tested span detector', () => {
   assert.ok(client.includes('BEGIN INLINED lib/vad.mjs'), 'the bundle must carry the detector')
   assert.ok(client.includes('class VoiceActivityDetector'), 'and it must be the real one')
   assert.ok(client.includes('detector.observe(rms)'), 'the detector must be fed the raw level')
+  // The peek is driven by a TIMER, not by the detector. Waiting for a detected
+  // pause made the live view depend on an estimate of the room, and a hum above
+  // the gate read as endless speech — so no pause was ever found and nothing was
+  // ever sent. A rolling window of audio needs to know nothing about the room.
+  assert.ok(client.includes('requestPeek()'), 'a new chunk of audio must ask for a peek')
   assert.ok(
-    client.includes("boundary.type === 'end'"),
-    'a closed span is the only safe moment to cut, so it must trigger the peek',
+    /ondataavailable[\s\S]{0,2000}requestPeek\(\)/.test(client),
+    'the peek must be triggered where the audio actually arrives',
   )
-  // The route must only be asked at a boundary; a timer-based peek cuts mid-word.
-  const flushIndex = client.indexOf('void flushPeek()')
-  const boundaryIndex = client.indexOf("boundary.type === 'end'")
-  assert.ok(boundaryIndex !== -1 && flushIndex > boundaryIndex, 'the peek must follow the boundary test')
+  // The detector still feeds the muted-microphone hint, which is the one thing
+  // it is still trusted for.
+  assert.ok(client.includes('detector.snapshot()'), 'the status line still reports the detector')
   // A package subpath is not a specifier the client-module loader answers, so
   // requiring one would throw while the bundle loaded and take the button with it.
   assert.ok(

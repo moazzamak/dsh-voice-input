@@ -49,13 +49,13 @@ window.__ModuleLoader__.load({
        *
        * @module dsh-voice-input/vad
        */
-
+      
       /** How often the caller reports a level. 50 ms = the composer's meter cadence. */
       const TICK_MS = 50
-
+      
       /** Levels sampled over one baseline window (2 s at 20 Hz). */
       const BASELINE_WINDOW = 40
-
+      
       /**
        * Consecutive loud levels that start a span (~200 ms).
        *
@@ -63,7 +63,7 @@ window.__ModuleLoader__.load({
        * enough that the first syllable is not waiting on it.
        */
       const SPEECH_START_TICKS = 4
-
+      
       /**
        * Consecutive quiet levels that close a span (~500 ms).
        *
@@ -71,10 +71,10 @@ window.__ModuleLoader__.load({
        * end a span; a real pause between instructions is longer, so it does.
        */
       const SILENCE_END_TICKS = 10
-
+      
       /** A span quieter than this is a blip, not speech, and is dropped. */
       const MIN_SPEECH_MS = 300
-
+      
       /**
        * Audio kept from BEFORE the span opened (~400 ms).
        *
@@ -83,20 +83,34 @@ window.__ModuleLoader__.load({
        * transcript would start mid-word.
        */
       const PREROLL_MS = 400
-
+      
       /** How far above the noise floor speech must rise to count (~+7 dB). */
       const GATE_FACTOR = 2.6
-
+      
       /**
-       * How near the floor a level must fall to count as silence again (~+1 dB).
+       * How near the floor a level must fall to count as silence again.
        *
-       * Deliberately just above the floor rather than a comfortable margin above it.
-       * When the floor has been corrected onto a room's hum, the hum IS the quiet
-       * level, so a "well below speech" margin would sit above the hum and the span
-       * would never be seen to end.
+       * Set well above the floor rather than just above it. This is the line the room
+       * has to drop below before a span can close, and it must clear the room's HUM,
+       * not merely its quietest moment — a hum that sits above this threshold is
+       * counted as continued speech, no silence ever accumulates, and the span stays
+       * open until the user presses stop. Anything speech can cross, this must sit
+       * below: speech arrives around 0.02-0.15, an order of magnitude higher.
        */
       const REARM_FACTOR = 1.1
-
+      
+      /**
+       * A span is closed by force after this long, whatever the levels say (~20 s).
+       *
+       * Silence detection can be defeated: a room noisy enough to sit above the rearm
+       * line, a speaker whose voice never drops far enough between sentences, or a
+       * floor estimate that landed below the truth. Without a bound, that is a live
+       * view which silently produces nothing for the whole recording — the user talks
+       * for a minute and sees no text, with no error and no clue. A forced close costs
+       * at most one extra decode and always makes progress.
+       */
+      const MAX_SPAN_MS = 20_000
+      
       /**
        * Levels used for the first measurement, before any adaptive tracking (~1 s).
        *
@@ -107,10 +121,10 @@ window.__ModuleLoader__.load({
        * like speech.
        */
       const CALIBRATION_TICKS = 20
-
+      
       /** The floor never drops below this, so a muted microphone cannot zero the gate. */
       const FLOOR_FLOOR = 0.0008
-
+      
       /**
        * Where the floor starts, before this room has been measured (~-34 dBFS).
        *
@@ -127,10 +141,10 @@ window.__ModuleLoader__.load({
        * either direction.
        */
       const FLOOR_START = 0.004
-
+      
       /** Absolute ceiling on the floor, so a noisy room cannot gate out real speech. */
       const FLOOR_CEILING = 0.08
-
+      
       /**
        * How uniform a window must be to count as ambience.
        *
@@ -142,7 +156,7 @@ window.__ModuleLoader__.load({
        * and every span stays open forever.
        */
       const QUIET_BAND = 1.2
-
+      
       /**
        * Tracks one room's noise floor and reports where speech spans begin and end.
        *
@@ -164,7 +178,7 @@ window.__ModuleLoader__.load({
           this.speechTicks = 0
           /** True while the opening calibration is still gathering its sample. */
           this.calibrating = true
-
+      
           this._window = new Float64Array(BASELINE_WINDOW)
           this._windowCount = 0
           this._windowNext = 0
@@ -174,17 +188,17 @@ window.__ModuleLoader__.load({
           this._quietTicks = 0
           this._latest = 0
         }
-
+      
         /** The level at which a span opens. Always above the floor by `GATE_FACTOR`. */
         get gate() {
           return Math.max(this.noiseFloor * GATE_FACTOR, FLOOR_FLOOR * GATE_FACTOR)
         }
-
+      
         /** The level a span must fall back to before its silence count starts. */
         get rearm() {
-          return Math.max(this.noiseFloor * REARM_FACTOR, FLOOR_FLOOR)
+          return Math.max(this.noiseFloor * REARM_FACTOR, FLOOR_FLOOR * REARM_FACTOR)
         }
-
+      
         /**
          * Record this tick's level and refine the noise floor.
          *
@@ -199,7 +213,7 @@ window.__ModuleLoader__.load({
         observe(level) {
           const value = Number.isFinite(level) && level > 0 ? level : 0
           this._latest = value
-
+      
           // Seed during the opening ticks, so the gate is meaningful immediately
           // rather than after a full window of speech has already gone by.
           if (this.calibrating) {
@@ -212,14 +226,14 @@ window.__ModuleLoader__.load({
               this._seedFloor(this._calibrationSum)
             }
           }
-
+      
           this._window[this._windowNext] = value
           this._windowNext = (this._windowNext + 1) % BASELINE_WINDOW
           if (this._windowCount < BASELINE_WINDOW) {
             this._windowCount += 1
             return
           }
-
+      
           let quietest = Infinity
           let loudest = 0
           for (let index = 0; index < BASELINE_WINDOW; index += 1) {
@@ -246,7 +260,7 @@ window.__ModuleLoader__.load({
           }
           this._seedFloor(quietest)
         }
-
+      
         /**
          * Advance the state machine one tick and report a span boundary.
          *
@@ -265,7 +279,7 @@ window.__ModuleLoader__.load({
           // then, and a span opened in that window opens against a floor that is still
           // a guess.
           if (this._windowCount < BASELINE_WINDOW) return null
-
+      
           if (this._latest >= this.gate) {
             this._quietTicks = 0
             if (!this.speaking) {
@@ -284,10 +298,10 @@ window.__ModuleLoader__.load({
             }
             return null
           }
-
+      
           this._loudTicks = 0
           if (!this.speaking) return null
-
+      
           // Only ticks that are still loud enough to be speech are counted, so the
           // reported duration is the SPOKEN part. Counting the closing silence too
           // would add `SILENCE_END_TICKS` to every span, which for a short utterance is
@@ -299,11 +313,19 @@ window.__ModuleLoader__.load({
             // would reach the closing threshold and be cut into pieces even though the
             // user never stopped talking.
             this._quietTicks = 0
-            return null
+          } else {
+            this._quietTicks += 1
           }
-          this._quietTicks += 1
-          if (this._quietTicks < SILENCE_END_TICKS) return null
-
+      
+          // The forced close is checked HERE, on every tick, and not inside the branch
+          // above. It exists for the case where the room NEVER drops far enough — a hum
+          // louder than the silence threshold, or a speaker who never quite pauses —
+          // and in that case the `>= rearm` branch returns before any later test could
+          // run. A backstop that the failure mode skips is not a backstop: the span
+          // stayed open, the user talked for a minute, and nothing was ever sent.
+          const spanMs = (this.speechTicks + this._quietTicks) * this.tickMs
+          if (this._quietTicks < SILENCE_END_TICKS && spanMs < MAX_SPAN_MS) return null
+      
           const speechMs = this.speechTicks * this.tickMs
           this.speaking = false
           this._quietTicks = 0
@@ -314,7 +336,7 @@ window.__ModuleLoader__.load({
           if (speechMs < MIN_SPEECH_MS) return null
           return { type: 'end', speechMs }
         }
-
+      
         /** Current state, for the client's indicator and for tests. */
         snapshot() {
           return {
@@ -324,7 +346,7 @@ window.__ModuleLoader__.load({
             calibrating: this.calibrating,
           }
         }
-
+      
         /**
          * Adopt a measured room level.
          *
@@ -348,7 +370,7 @@ window.__ModuleLoader__.load({
           this.noiseFloor = Math.min(blended, FLOOR_CEILING)
         }
       }
-
+      
       /**
        * Absolute-RMS floor used when no adaptive measurement is available yet.
        *
@@ -356,7 +378,7 @@ window.__ModuleLoader__.load({
        * "obviously quiet" line — it is a starting point, never the decision rule.
        */
       const DEFAULT_NOISE_FLOOR = 0.005
-
+      
 
       return { VoiceActivityDetector, DEFAULT_NOISE_FLOOR, TICK_MS, PREROLL_MS, MIN_SPEECH_MS, SILENCE_END_TICKS, SPEECH_START_TICKS, BASELINE_WINDOW }
     })()
@@ -408,6 +430,15 @@ window.__ModuleLoader__.load({
      * and posted when the flight finishes, never dropped.
      */
     const PEEK_MIN_INTERVAL_MS = 1200
+
+    /**
+     * New chunks required before another peek (~2 s of audio).
+     *
+     * Each peek decodes everything captured so far, so the cost of a recording
+     * grows with its length. This is the throttle: enough new audio to be worth a
+     * decode, without asking for a decode per chunk.
+     */
+    const PEEK_EVERY_CHUNKS = 2
 
     /** Marks the live transcript inside the draft, and pulses while work is in flight. */
     const CARET = '\u258F'
@@ -743,43 +774,16 @@ window.__ModuleLoader__.load({
             // detector was still deciding.
             levelPeak.current = Math.max(levelPeak.current, level)
             quietStreak.current = level > 0.006 ? 0 : quietStreak.current + 1
-            if (boundary !== null && boundary.type === 'end') {
-              // The DECISION is reported, not only the request it leads to.
-              // Everything downstream stays silent when this never fires — no
-              // peek, no text, no caret, no error — which is how a working
-              // detector and an unwired one came to look identical.
-              spanNote.current = `live view: span closed (${Math.round(boundary.speechMs)} ms of speech)`
-              note = spanNote.current
-              // `void` discards the promise, so ANY throw inside the peek becomes
-              // an unhandled rejection with no route to the user. A single
-              // misspelled identifier on the function's first line threw on every
-              // call and produced no symptom at all — no request, no note, no
-              // caret — which is how a fully wired live view came to look exactly
-              // like one that was never connected. Failures must land somewhere.
-              flushPeek().catch((error) => {
-                console.error('voice-input: live peek threw', error)
-                setState((previous) => ({
-                  ...previous,
-                  note: `live view: ${error && error.message ? error.message : String(error)}`,
-                }))
-              })
-            } else if (liveRef.current?.inFlight !== true && spanNote.current === null) {
-              // Idle between peeks: report the live state, and the numbers that
-              // decide it. A gate the speaker never crosses is the one failure
-              // that produces no other symptom at all, so it is worth showing.
-              //
-              // SUPPRESSED once a span has closed. This line fires every 50 ms,
-              // so leaving it running would erase the peek's own result before
-              // anyone could read it — which is exactly how a live view that was
-              // working looked identical to one that never ran at all.
+            // A note is NOT written here any more. The peek is driven by a timer,
+            // and `flushPeek` reports its own outcome; a status line every 50 ms
+            // would erase that report before it could be read, which is how a
+            // live view that was working came to look like one that never ran.
+            if (liveRef.current?.inFlight !== true && spanNote.current === null) {
               const snap = detector.snapshot()
               note = `listening — floor ${snap.noiseFloor.toFixed(4)} gate ${snap.gate.toFixed(4)}`
                 + `${snap.speaking ? ' · hearing you' : ''}${snap.calibrating ? ' · calibrating' : ''}`
             }
           }
-          // ONE note per tick, unless a peek is mid-flight and owns it: a
-          // status write here would otherwise erase the peek's own result before
-          // it could be read.
           if (note !== undefined) setState((previous) => ({ ...previous, note }))
           setQuiet(levelPeak.current <= 0.006 && quietStreak.current >= QUIET_SAMPLES_BEFORE_HINT)
         }
@@ -865,6 +869,37 @@ window.__ModuleLoader__.load({
        * moment a peek can be cut without the recognizer inventing an ending for
        * the half-word the cut landed in.
        */
+      /**
+       * Ask for a peek, if enough new audio has arrived to be worth decoding.
+       *
+       * Called every time the recorder hands over a chunk. The whole recording so
+       * far is sent each time, and the host returns the transcript of ALL of it —
+       * which is why no overlap stitching is needed here. The words are not
+       * assembled from fragments that have to be aligned; each answer is a
+       * complete reading of the audio, so what the draft shows is always
+       * internally consistent, and the final pass over the finished recording has
+       * the last word.
+       *
+       * The cost is that a decode grows with the recording, which is why a peek is
+       * only asked for once a couple of seconds of new audio exist. For a voice
+       * instruction that is a handful of decodes; for a monologue it is more, and
+       * the honest bound on it belongs in the README rather than in silence.
+       */
+      const requestPeek = () => {
+        const live = liveRef.current
+        if (live === null || held.recorder === null) return
+        if (held.chunks.length - live.chunksAtPeek < PEEK_EVERY_CHUNKS) return
+        flushPeek().catch((error) => {
+          // A floating promise is what turned a hard ReferenceError into complete
+          // silence once already. Failures must land somewhere.
+          console.error('voice-input: live peek threw', error)
+          setState((previous) => ({
+            ...previous,
+            note: `live view: ${error && error.message ? error.message : String(error)}`,
+          }))
+        })
+      }
+
       const flushPeek = async () => {
         // The `held` ref is read straight from the enclosing scope. It used to be
         // copied through `const held = heldRef.current` — reading a name that does
@@ -900,6 +935,7 @@ window.__ModuleLoader__.load({
         live.inFlight = true
         live.pending = false
         live.lastPeekAt = Date.now()
+        live.chunksAtPeek = held.chunks.length
         // Say that a peek is in flight, and how much audio it carries: a note
         // that never changes is itself the finding.
         setState((previous) => ({
@@ -1102,6 +1138,7 @@ window.__ModuleLoader__.load({
             inFlight: false,
             pending: false,
             lastPeekAt: 0,
+            chunksAtPeek: 0,
           }
           // Ask the host to load the model NOW, while the user is still
           // speaking: that turns the model-load cost into time the recording
@@ -1115,6 +1152,14 @@ window.__ModuleLoader__.load({
           recorder.ondataavailable = (event) => {
             if (event.data !== undefined && event.data !== null && event.data.size > 0) {
               held.current.chunks.push(event.data)
+              // A TIMER, not a silence decision. The peek used to wait for the span
+              // detector to report a pause, which made the live view depend on an
+              // estimate of the room: a hum louder than the gate read as endless
+              // speech, so no pause was ever found and nothing was ever sent. A
+              // window of audio needs to know nothing about the room. The recorder
+              // emits one chunk per CHUNK_MS, so this runs on a steady cadence for
+              // as long as the user speaks.
+              requestPeek()
             }
           }
           recorder.onerror = (event) => {
